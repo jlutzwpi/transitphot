@@ -53,7 +53,7 @@ def cmd_run(args):
 
     times, tflux, cflux = [], [], []
     ref_snapshot = None          # (data, header, positions, aperture radii)
-    for p, data, hdr in ph.align_to_reference(paths):
+    for p, data, hdr in ph.iter_frames(paths):
         try:
             tx, ty = ph.sky_to_pixel(hdr, args.ra, args.dec)
             positions = [(tx, ty)] + [ph.sky_to_pixel(hdr, c.ra_deg, c.dec_deg)

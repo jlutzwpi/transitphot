@@ -27,13 +27,38 @@ def estimate_fwhm(data: np.ndarray, fwhm_guess: float = 4.0) -> float:
                          2.0, 12.0))
 
 
+def iter_frames(paths: list[Path]):
+    """
+    Yield (path, data, header) for each frame, unmodified.
+
+    Deliberately NO image registration: every frame is plate-solved, so
+    aperture positions are computed from that frame's own WCS. This is
+    better than aligning — resampling pixels to a common grid interpolates
+    flux between neighbours, which is exactly the quantity we are trying to
+    measure. Photometry belongs on original pixels.
+    """
+    for p in paths:
+        try:
+            yield p, fits.getdata(p).astype(float), fits.getheader(p)
+        except Exception as exc:                      # noqa: BLE001
+            print(f"[read] skipped {p.name}: {exc}")
+
+
 def align_to_reference(paths: list[Path], reference: Path | None = None):
     """
-    Align frames using astroalign (triangle matching — no WCS required).
-    Yields (path, aligned_data, header). Frames that fail to align are
-    skipped with a warning rather than aborting the run.
+    Optional fallback for UNSOLVED frames: triangle-matching registration
+    via astroalign. Requires the optional `astroalign` extra
+    (`pip install "transitphot[align]"`), which needs a C compiler on
+    Windows. Prefer plate solving and iter_frames().
     """
-    import astroalign as aa
+    try:
+        import astroalign as aa
+    except ImportError as exc:                        # noqa: BLE001
+        raise SystemExit(
+            "astroalign is not installed. It is only needed for unsolved "
+            "frames — plate solve instead:\n"
+            "  transitphot solve --lights <dir> --ra <deg> --dec <deg>"
+        ) from exc
 
     ref_path = reference or paths[0]
     ref = fits.getdata(ref_path).astype(float)
