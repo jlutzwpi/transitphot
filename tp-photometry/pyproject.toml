@@ -1,0 +1,22 @@
+[project]
+name = "transitphot"
+version = "0.1.0"
+description = "Local FITS-to-light-curve pipeline for exoplanet transit photometry"
+requires-python = ">=3.10"
+dependencies = [
+    "astropy>=6.0",
+    "numpy>=1.24",
+    "ccdproc>=2.4",
+    "photutils>=1.12",
+    "astroalign>=2.5",
+    "astroquery>=0.4.7",
+    "requests>=2.31",
+    "matplotlib>=3.7",
+]
+
+[project.scripts]
+transitphot = "transitphot.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"

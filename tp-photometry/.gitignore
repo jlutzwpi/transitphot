@@ -1,0 +1,20 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# outputs from runs
+*.csv
+*.png
+*.reg
+*.fits
+*.fit
+lightcurve*
+*_summary.json
+
+.DS_Store
+.vscode/
+.idea/
