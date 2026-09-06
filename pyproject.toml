@@ -8,11 +8,15 @@ dependencies = [
     "numpy>=1.24",
     "ccdproc>=2.4",
     "photutils>=1.12",
-    "astroalign>=2.5",
     "astroquery>=0.4.7",
     "requests>=2.31",
     "matplotlib>=3.7",
 ]
+
+[project.optional-dependencies]
+# Only needed to process UNSOLVED frames. Requires a C compiler on Windows
+# (sep builds from source). Plate solving with ASTAP is the better path.
+align = ["astroalign>=2.5"]
 
 [project.scripts]
 transitphot = "transitphot.cli:main"

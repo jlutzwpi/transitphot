@@ -33,6 +33,17 @@ comparison stars by coordinate. ASIAIR and similar controllers solve for
 [ASTAP](https://www.hnsky.org/astap.htm)) to fix it. Install ASTAP and a
 star database (D50 is sufficient for typical SCT fields) first.
 
+## Why there's no alignment step
+
+Every frame is plate-solved, so aperture positions come from that frame's own
+WCS. Registering frames to a common grid would resample the pixels —
+interpolating flux between neighbors — which degrades the very quantity being
+measured. Photometry belongs on original pixels.
+
+If you genuinely can't plate solve, `pip install "transitphot[align]"` adds
+astroalign as a fallback. On Windows that needs a C compiler; solving with
+ASTAP is easier and gives better results.
+
 ## What it does that AstroImageJ makes you do by hand
 
 * Picks comparison stars automatically — matched in brightness *and color*,
