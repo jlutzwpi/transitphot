@@ -236,25 +236,63 @@ class App(tk.Tk):
                          daemon=True).start()
 
     def _lookup_worker(self, name):
+        """
+        Query the NASA Exoplanet Archive TAP service.
+
+        The service is often slow — 30 seconds is not unusual for a cold
+        query — so the timeout is generous and failures explain what to do
+        rather than just reporting the exception. Runs on a worker thread so
+        the window stays responsive.
+        """
+        import urllib.error
         import urllib.parse
         import urllib.request
-        adql = (
-            "SELECT pl_name, ra, dec, sy_vmag, sy_gaiamag, pl_orbper, "
-            "pl_tranmid, pl_trandur, pl_trandep FROM pscomppars "
-            f"WHERE pl_name = '{name}'"
-        )
-        url = ("https://exoplanetarchive.ipac.caltech.edu/TAP/sync?query="
-               + urllib.parse.quote(adql) + "&format=json")
-        try:
-            with urllib.request.urlopen(url, timeout=30) as r:
-                rows = json.load(r)
-        except Exception as exc:                        # noqa: BLE001
-            self.q.put(f"Lookup failed: {exc}\n")
-            return
+
+        wanted = ("pl_name, ra, dec, sy_vmag, sy_gaiamag, pl_orbper, "
+                  "pl_tranmid, pl_trandur, pl_trandep")
+        # Try the exact name first, then a case-insensitive match, then a
+        # prefix match — archive names carry spaces and capitalisation that
+        # are easy to get slightly wrong ("TrES-5b" vs "TrES-5 b").
+        safe = name.replace("'", "''")
+        queries = [
+            f"SELECT {wanted} FROM pscomppars WHERE pl_name = '{safe}'",
+            f"SELECT {wanted} FROM pscomppars "
+            f"WHERE UPPER(pl_name) = UPPER('{safe}')",
+            f"SELECT {wanted} FROM pscomppars "
+            f"WHERE UPPER(pl_name) LIKE UPPER('{safe}%')",
+        ]
+
+        rows = None
+        last_err = None
+        for attempt, adql in enumerate(queries, 1):
+            url = ("https://exoplanetarchive.ipac.caltech.edu/TAP/sync?query="
+                   + urllib.parse.quote(adql) + "&format=json")
+            try:
+                req = urllib.request.Request(
+                    url, headers={"User-Agent": "transitphot"})
+                with urllib.request.urlopen(req, timeout=90) as r:
+                    rows = json.load(r)
+            except Exception as exc:                    # noqa: BLE001
+                last_err = exc
+                self.q.put(f"  attempt {attempt} failed ({exc})\n")
+                continue
+            if rows:
+                break
+
         if not rows:
-            self.q.put(f"No archive entry for '{name}'. Names look like "
-                       f"'Kepler-17 b' or 'TrES-3 b' (note the space).\n")
+            if last_err is not None:
+                self.q.put(
+                    "Lookup failed. The archive service is often slow or "
+                    "briefly unavailable — try again in a moment, or enter "
+                    "the values by hand from\n"
+                    "  https://exoplanetarchive.ipac.caltech.edu/\n")
+            else:
+                self.q.put(
+                    f"No archive entry matching '{name}'. Names carry a space "
+                    f"before the planet letter, e.g. 'TrES-5 b', "
+                    f"'Kepler-17 b', 'WASP-10 b'.\n")
             return
+
         r0 = rows[0]
 
         def put(key, val, fmt="{:.6g}"):
@@ -269,6 +307,8 @@ class App(tk.Tk):
         put("duration_hours", r0.get("pl_trandur"))
         if r0.get("pl_trandep") is not None:
             self.vars["depth_ppm"].set(f"{r0['pl_trandep'] * 10000:.0f}")
+        if r0.get("pl_name") and r0["pl_name"] != name:
+            self.vars["target_name"].set(r0["pl_name"])
         self.q.put(f"Filled parameters for {r0['pl_name']}.\n")
 
     # ---------------- running ----------------
