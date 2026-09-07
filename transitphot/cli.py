@@ -83,9 +83,20 @@ def cmd_run(args):
         print(f"WARNING: measured session FWHM {fwhm:.1f} px is outside the "
               f"usual 2-8 px range. Check the finder chart; override with "
               f"--fwhm <px> if it looks wrong.")
-    R_AP, R_IN, R_OUT = 2.0 * fwhm, 3.5 * fwhm, 6.0 * fwhm
-    print(f"Session FWHM {fwhm:.2f} px -> aperture {R_AP:.1f} px, "
-          f"sky annulus {R_IN:.1f}-{R_OUT:.1f} px (fixed for all frames)")
+
+    # Try a ladder of apertures and let the data pick. For a faint,
+    # background-limited target the best aperture is near 1x FWHM — every
+    # extra pixel adds sky noise without adding much star. For a bright one
+    # a wider aperture wins. Guessing a single multiple gets this wrong.
+    if args.aperture_scale:
+        scales = [args.aperture_scale]
+    else:
+        scales = [0.7, 0.9, 1.1, 1.3, 1.6, 2.0]
+    RADII = [sc * fwhm for sc in scales]
+    R_IN, R_OUT = 3.5 * fwhm, 6.0 * fwhm
+    print(f"Session FWHM {fwhm:.2f} px | trying apertures "
+          + ", ".join(f"{r:.1f}" for r in RADII)
+          + f" px | sky annulus {R_IN:.1f}-{R_OUT:.1f} px")
 
     times, tflux, cflux = [], [], []
     ref_snapshot = None          # (data, header, positions, aperture radii)
@@ -102,7 +113,6 @@ def cmd_run(args):
                 "  transitphot check --lights <dir>     # confirm\n"
                 f"  transitphot solve --lights <dir> --ra {args.ra} "
                 f"--dec {args.dec}")
-        r_ap, r_in, r_out = R_AP, R_IN, R_OUT
 
         # Refine each catalog position onto the actual star. A frame where
         # the target or a comparison isn't detectable has a bad WCS (stale
@@ -119,17 +129,37 @@ def cmd_run(args):
         positions = refined
 
         if ref_snapshot is None:
-            ref_snapshot = (data, hdr, positions, (r_ap, r_in, r_out))
-        flux = ph.measure(data, positions, r_ap=r_ap, r_in=r_in, r_out=r_out)
+            ref_snapshot = (data, hdr, positions, (RADII[len(RADII)//2], R_IN, R_OUT))
+        flux = ph.measure(data, positions, r_ap=RADII, r_in=R_IN, r_out=R_OUT)
         times.append(ph.frame_time(hdr))
-        tflux.append(flux[0])
-        cflux.append(flux[1:])
+        tflux.append(flux[:, 0])           # (n_radii,)
+        cflux.append(flux[:, 1:])          # (n_radii, n_comps)
         n_done += 1
         if n_done % 25 == 0:
             print(f"  measured {n_done}/{len(paths)} frames")
 
-    tflux = np.array(tflux)
-    cflux = np.array(cflux).T                       # (n_comps, n_frames)
+    tflux = np.array(tflux)                          # (n_frames, n_radii)
+    cflux = np.array(cflux)                          # (n_frames, n_radii, n_comps)
+
+    # Pick the aperture that minimises median comparison-star scatter. The
+    # comparisons are (presumed) constant stars, so whichever aperture makes
+    # them most stable is the one measuring flux best — and choosing on the
+    # comparisons rather than the target avoids biasing the transit itself.
+    if len(RADII) > 1:
+        print("Aperture scan (median comparison-star scatter):")
+        best_i, best_med = 0, np.inf
+        for i, r in enumerate(RADII):
+            sc = cs.stability_report(cflux[:, i, :].T)
+            med = float(np.nanmedian(sc))
+            mark = ""
+            if med < best_med:
+                best_i, best_med, mark = i, med, ""
+            print(f"  {r:5.1f} px  {med:8.0f} ppm")
+        print(f"  -> using {RADII[best_i]:.1f} px")
+    else:
+        best_i = 0
+    tflux = tflux[:, best_i]
+    cflux = cflux[:, best_i, :].T                    # (n_comps, n_frames)
 
     scatter_ppm = cs.stability_report(cflux)
     keep = cs.check_stability(cflux)
@@ -313,6 +343,9 @@ def main():
     r.add_argument("--plot", help="write a PNG light curve to this path")
     r.add_argument("--fwhm", type=float,
                    help="override the measured session FWHM, in pixels")
+    r.add_argument("--aperture-scale", type=float, dest="aperture_scale",
+                   help="fix the aperture at this multiple of FWHM instead "
+                        "of scanning for the best")
     r.set_defaults(func=cmd_run)
 
     k = sub.add_parser("check", help="report which frames have a usable WCS")

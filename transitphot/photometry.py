@@ -184,24 +184,41 @@ def refine_position(data: np.ndarray, xy: tuple[float, float], box: float = 12.0
 
 
 def measure(data: np.ndarray, positions: list[tuple[float, float]],
-            r_ap: float, r_in: float, r_out: float) -> np.ndarray:
+            r_ap, r_in: float, r_out: float) -> np.ndarray:
     """
-    Aperture photometry with local background annulus.
-    Returns background-subtracted flux per position.
+    Aperture photometry with a local background annulus.
+
+    r_ap may be a single radius or a sequence of radii. Measuring several
+    radii in one pass costs almost nothing (the background annulus is shared)
+    and lets the pipeline choose the aperture that actually minimises scatter
+    rather than guessing a multiple of FWHM.
+
+    Returns background-subtracted flux, shaped (n_radii, n_positions) when
+    given a sequence, or (n_positions,) for a single radius.
     """
-    aps = CircularAperture(positions, r=r_ap)
+    radii = np.atleast_1d(np.asarray(r_ap, dtype=float))
     anns = CircularAnnulus(positions, r_in=r_in, r_out=r_out)
-    phot = aperture_photometry(data, [aps, anns])
 
     ann_masks = anns.to_mask(method="center")
     bkg_median = []
     for m in ann_masks:
         vals = m.multiply(data)
         vals = vals[m.data > 0]
-        _, med, _ = sigma_clipped_stats(vals[np.isfinite(vals)], sigma=3.0)
+        vals = vals[np.isfinite(vals)]
+        if vals.size == 0:
+            bkg_median.append(np.nan)
+            continue
+        _, med, _ = sigma_clipped_stats(vals, sigma=3.0)
         bkg_median.append(med)
-    bkg_total = np.array(bkg_median) * aps.area
-    return np.array(phot["aperture_sum_0"]) - bkg_total
+    bkg_median = np.array(bkg_median)
+
+    out = []
+    for r in radii:
+        aps = CircularAperture(positions, r=float(r))
+        phot = aperture_photometry(data, aps)
+        out.append(np.array(phot["aperture_sum"]) - bkg_median * aps.area)
+    out = np.array(out)
+    return out[0] if np.ndim(r_ap) == 0 else out
 
 
 def sky_to_pixel(header: dict, ra_deg: float, dec_deg: float):
