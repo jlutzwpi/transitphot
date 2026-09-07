@@ -256,6 +256,16 @@ def cmd_run(args):
         print(f"            {reg.name} + {ref.name} — load the .reg over the "
               f"FITS in DS9 or AstroImageJ to check placement at full resolution")
 
+    # Predicted mid-time from the archive ephemeris, for whichever transit
+    # this session actually covers.
+    if args.epoch_bjd and args.period_days and not args.predicted_mid:
+        centre = float(np.median(times))
+        n = round((centre - args.epoch_bjd) / args.period_days)
+        args.predicted_mid = args.epoch_bjd + n * args.period_days
+        args.pred_system = "bjd_tdb"
+        print(f"Predicted mid-transit from ephemeris (epoch + {n} x period): "
+              f"{args.predicted_mid:.5f} BJD_TDB")
+
     # --- BJD_TDB ---
     if args.lat is not None and args.lon is not None:
         from .timing import jd_utc_to_bjd_tdb
@@ -387,6 +397,12 @@ def main():
     r.add_argument("--fit", action="store_true", help="fit the transit model")
     r.add_argument("--predicted-mid", type=float,
                    help="predicted mid-transit time, for O-C")
+    r.add_argument("--epoch-bjd", type=float, dest="epoch_bjd",
+                   help="reference transit epoch (BJD_TDB) from the archive; "
+                        "with --period, the predicted mid-time for THIS night "
+                        "is computed for you")
+    r.add_argument("--period", type=float, dest="period_days",
+                   help="orbital period in days, used with --epoch-bjd")
     r.add_argument("--predicted-mid-system", dest="pred_system",
                    choices=["bjd_tdb", "jd_utc"], default="bjd_tdb",
                    help="time system of --predicted-mid. AstroImageJ reports "
