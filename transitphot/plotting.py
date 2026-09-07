@@ -9,7 +9,10 @@ import numpy as np
 
 def plot_lightcurve(bjd, flux, flux_err=None, fit_result=None,
                     title: str = "", out: Path = Path("lightcurve.png"),
-                    bin_minutes: float = 5.0):
+                    bin_minutes: float = 5.0,
+                    predicted_mid: float | None = None,
+                    duration_days: float | None = None,
+                    meridian_bjd: float | None = None):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -39,11 +42,30 @@ def plot_lightcurve(bjd, flux, flux_err=None, fit_result=None,
     ax.errorbar(bx, by, yerr=be, fmt="o", ms=5, color="#1b2a4a",
                 capsize=2, label=f"{bin_minutes:.0f}-min bins")
 
+    # Predicted contacts and the meridian flip, as labelled verticals.
+    def vline(ax, when, color, label, style="--"):
+        if when is None:
+            return
+        xv = (when - t0) * 24.0
+        if not (x.min() - 0.2 <= xv <= x.max() + 0.2):
+            return
+        ax.axvline(xv, ls=style, lw=1.1, color=color, alpha=0.75)
+        ax.annotate(label, xy=(xv, 1.0), xycoords=("data", "axes fraction"),
+                    xytext=(3, -12), textcoords="offset points",
+                    rotation=90, va="top", ha="left",
+                    fontsize=8.5, color=color)
+
+    if predicted_mid is not None and duration_days:
+        vline(ax, predicted_mid - duration_days / 2, "#2a6f97", "predicted ingress")
+        vline(ax, predicted_mid + duration_days / 2, "#2a6f97", "predicted egress")
+    vline(ax, meridian_bjd, "#b07d2b", "meridian flip", style=":")
+
     if has_fit:
         fine = np.linspace(bjd.min(), bjd.max(), 800)
         model = trapezoid(fine, fit_result.mid_bjd, fit_result.depth,
                           fit_result.duration_days, fit_result.ingress_days,
-                          1.0, fit_result.baseline_slope)
+                          1.0, fit_result.baseline_slope,
+                          fit_result.baseline_curve)
         ax.plot((fine - t0) * 24.0, model, "-", lw=1.8, color="#c1121f",
                 label="trapezoid fit")
         ax.axvline((fit_result.mid_bjd - t0) * 24.0, ls="--", lw=1,
@@ -58,7 +80,8 @@ def plot_lightcurve(bjd, flux, flux_err=None, fit_result=None,
         resid = flux - trapezoid(bjd, fit_result.mid_bjd, fit_result.depth,
                                  fit_result.duration_days,
                                  fit_result.ingress_days, 1.0,
-                                 fit_result.baseline_slope)
+                                 fit_result.baseline_slope,
+                                 fit_result.baseline_curve)
         axes[1].plot(x, resid * 1e6, ".", ms=3, color="#9aa4b8", alpha=0.6)
         axes[1].axhline(0, color="#c1121f", lw=1)
         axes[1].set_ylabel("resid (ppm)")

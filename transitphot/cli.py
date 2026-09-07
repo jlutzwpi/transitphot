@@ -324,8 +324,24 @@ def cmd_run(args):
 
         if args.plot:
             from .plotting import plot_lightcurve
-            plot_lightcurve(bjd, norm, err, res, title=f"RA {args.ra} Dec {args.dec}",
-                            out=Path(args.plot))
+            from .timing import meridian_crossing
+            mer = None
+            if args.lat is not None and args.lon is not None:
+                mer_jd = meridian_crossing(times, args.ra, args.lat, args.lon)
+                if mer_jd is not None:
+                    # convert to the same axis the curve is plotted on
+                    from .timing import jd_utc_to_bjd_tdb
+                    mer = float(jd_utc_to_bjd_tdb(
+                        np.array([mer_jd]), args.ra, args.dec,
+                        args.lat, args.lon, args.elevation)[0])
+                    print(f"  meridian crossing at {mer:.5f} BJD_TDB")
+            plot_lightcurve(bjd, norm, err, res,
+                            title=f"RA {args.ra} Dec {args.dec}",
+                            out=Path(args.plot),
+                            predicted_mid=(pred if args.predicted_mid else None),
+                            duration_days=(args.duration_hours / 24.0
+                                           if args.duration_hours else None),
+                            meridian_bjd=mer)
             print(f"  wrote {args.plot}")
 
 

@@ -43,3 +43,35 @@ def bjd_to_phase(bjd: np.ndarray, epoch_bjd: float, period_days: float
     """Orbital phase in [-0.5, 0.5), with 0 at mid-transit."""
     ph = ((np.asarray(bjd) - epoch_bjd) / period_days) % 1.0
     return np.where(ph > 0.5, ph - 1.0, ph)
+
+
+def meridian_crossing(jd_utc: np.ndarray, ra_deg: float,
+                      lat_deg: float, lon_deg: float) -> float | None:
+    """
+    When the target crossed the meridian during the session, as JD(UTC).
+
+    Computed from the hour angle: HA = local apparent sidereal time - RA,
+    and the meridian is HA = 0. Returns None when no crossing falls inside
+    the observed window (a target still rising, or already setting, never
+    flips mid-session).
+
+    Worth marking on a light curve: a German equatorial mount flips here,
+    which puts every star on different pixels. Any step in the photometry at
+    this time is instrumental, not astrophysical.
+    """
+    jd_utc = np.asarray(jd_utc, dtype=float)
+    if jd_utc.size < 2:
+        return None
+    site = EarthLocation(lat=lat_deg * u.deg, lon=lon_deg * u.deg)
+    t = Time(jd_utc, format="jd", scale="utc", location=site)
+    lst = t.sidereal_time("apparent").deg
+    ha = (lst - ra_deg + 180.0) % 360.0 - 180.0      # wrap to [-180, 180)
+
+    sign = np.sign(ha)
+    flips = np.where(np.diff(sign) != 0)[0]
+    for i in flips:
+        # ignore the +180/-180 wrap, we want the crossing through zero
+        if abs(ha[i]) < 90 and abs(ha[i + 1]) < 90:
+            f = abs(ha[i]) / (abs(ha[i]) + abs(ha[i + 1]))
+            return float(jd_utc[i] + f * (jd_utc[i + 1] - jd_utc[i]))
+    return None

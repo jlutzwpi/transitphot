@@ -33,6 +33,7 @@ class TransitFit:
     duration_days: float
     ingress_days: float
     baseline_slope: float
+    baseline_curve: float
     rms_ppm: float
     n_points: int
 
@@ -45,25 +46,29 @@ class TransitFit:
         return self.depth * 1e6
 
 
-def trapezoid(t, mid, depth, duration, ingress, base, slope):
+def trapezoid(t, mid, depth, duration, ingress, base, slope, curve=0.0):
     """
-    Trapezoidal transit plus a linear baseline trend.
+    Trapezoidal transit multiplied by a quadratic baseline.
 
     duration = first-to-fourth contact (total)
     ingress  = duration of the ingress ramp (= egress ramp)
+    base, slope, curve = baseline continuum, in days from mid
+
+    The quadratic term matters: airmass changes non-linearly through a
+    session, so a straight-line baseline leaves curvature that the transit
+    parameters absorb — typically by stretching the ingress ramp into a
+    V-shape, which inflates the uncertainty on both depth and mid-time.
     """
     dt = np.asarray(t, dtype=float) - mid
     half_total = duration / 2.0
     half_flat = max(half_total - ingress, 1e-9)
 
     f = np.ones_like(dt)
-    # fully in transit
     f = np.where(np.abs(dt) <= half_flat, 1.0 - depth, f)
-    # ingress / egress ramps
     ramp = (np.abs(dt) > half_flat) & (np.abs(dt) < half_total)
     frac = (half_total - np.abs(dt)) / ingress
     f = np.where(ramp, 1.0 - depth * np.clip(frac, 0, 1), f)
-    return f * (base + slope * dt)
+    return f * (base + slope * dt + curve * dt ** 2)
 
 
 def fit(bjd: np.ndarray, flux: np.ndarray, flux_err: np.ndarray | None = None,
@@ -101,8 +106,12 @@ def fit(bjd: np.ndarray, flux: np.ndarray, flux_err: np.ndarray | None = None,
 
     # Mid-time must lie INSIDE the observed window: a fit that puts
     # mid-transit beyond the data has not measured anything.
-    lo = [x.min(), 1e-5, dur0 * 0.3, 1e-4, 0.9, -5.0]
-    hi = [x.max(), 0.5,  dur0 * 3.0, dur0,  1.1,  5.0]
+    # Ingress is bounded to 4-30% of the total duration. Geometrically it is
+    # about (Rp/R*) x T14 for a non-grazing transit — a few percent to ~20%.
+    # Leaving it free to reach 100% lets the model become a V and swallow
+    # baseline curvature instead of measuring a transit.
+    lo = [x.min(), 1e-5, dur0 * 0.3, dur0 * 0.04, 0.9, -5.0, -50.0]
+    hi = [x.max(), 0.5,  dur0 * 3.0, dur0 * 0.30, 1.1,  5.0,  50.0]
     if fix_duration and expected_duration_hours:
         # Duration is well known from the archive and trades against depth
         # and mid-time in a noisy fit. Pinning it removes a degeneracy that
@@ -115,7 +124,7 @@ def fit(bjd: np.ndarray, flux: np.ndarray, flux_err: np.ndarray | None = None,
     best, best_chi2 = None, np.inf
     for m in starts:
         m = float(np.clip(m, lo[0] + 1e-6, hi[0] - 1e-6))
-        p0 = [m, dep0, dur0, dur0 * 0.15, 1.0, 0.0]
+        p0 = [m, dep0, dur0, dur0 * 0.12, 1.0, 0.0, 0.0]
         p0 = [float(np.clip(v, l, h)) for v, l, h in zip(p0, lo, hi)]
         try:
             # soft_l1 loss: quadratic near zero, linear in the tails, so a
@@ -133,24 +142,33 @@ def fit(bjd: np.ndarray, flux: np.ndarray, flux_err: np.ndarray | None = None,
     if best is None:
         raise RuntimeError("Transit fit did not converge — check the light curve.")
 
-    perr = np.sqrt(np.diag(best_cov))
-    # NOTE: with sigma=None, curve_fit already scales the covariance by
-    # chi2/dof (absolute_sigma=False), so no further rescaling here — doing
-    # it twice collapses the reported uncertainty to ~0.
-    #
-    # With a robust loss the covariance estimate is unreliable and can come
-    # back non-finite or absurdly large. A mid-time error bar is the number
-    # people submit, so when it looks broken we measure it directly by
-    # bootstrapping the residuals instead of reporting garbage.
+    # Uncertainties: the robust (soft_l1) loss finds parameter values that
+    # outliers can't dictate, but its covariance is not a meaningful error
+    # estimate. So re-fit with ordinary least squares, starting from the
+    # robust solution and clipping the points it flagged as outliers, and
+    # take the errors from that. This separates the two jobs: robustness for
+    # the values, standard statistics for the error bars.
+    resid_r = flux - trapezoid(x, *best)
+    s = 1.4826 * np.median(np.abs(resid_r - np.median(resid_r)))
+    inl = np.abs(resid_r) < 4 * s if s > 0 else np.ones(len(x), bool)
+    try:
+        _, cov_ls = curve_fit(
+            trapezoid, x[inl], flux[inl], p0=best, bounds=(lo, hi),
+            sigma=(sigma[inl] if sigma is not None else None),
+            absolute_sigma=sigma is not None, maxfev=20000)
+        perr = np.sqrt(np.diag(cov_ls))
+    except Exception:                                   # noqa: BLE001
+        perr = np.sqrt(np.diag(best_cov))
+
     span_days = float(x.max() - x.min())
-    if not np.isfinite(perr[0]) or perr[0] > span_days:
+    if not np.all(np.isfinite(perr)) or perr[0] > span_days:
         perr = _bootstrap_errors(x, flux, best, lo, hi, sigma)
 
     return TransitFit(
         mid_bjd=float(best[0]) + origin, mid_err_days=float(perr[0]),
         depth=float(best[1]), depth_err=float(perr[1]),
         duration_days=float(best[2]), ingress_days=float(best[3]),
-        baseline_slope=float(best[5]),
+        baseline_slope=float(best[5]), baseline_curve=float(best[6]),
         rms_ppm=float(np.std(best_resid) * 1e6), n_points=len(x),
     )
 
