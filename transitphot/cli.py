@@ -176,7 +176,24 @@ def cmd_run(args):
         print(f"Rejected {n_rejected} frame(s): target or a comparison star "
               f"was not detectable at its expected position "
               f"(stale WCS, cloud, or off-sensor)")
-    norm, err = ph.differential_curve(tflux, cflux[keep])
+    # Weight by 1/scatter^2 rather than hard-dropping: a noisy comparison
+    # still carries real transparency information, and shrinking the ensemble
+    # raises its own shot noise. Only catastrophically bad stars (>3x the
+    # best star's scatter) are vetoed outright.
+    weights = ph.weights_from_scatter(scatter_ppm)
+    finite = np.isfinite(scatter_ppm)
+    if finite.any():
+        best = float(np.nanmin(scatter_ppm[finite]))
+        veto = finite & (scatter_ppm > 3 * best)
+        weights[veto] = 0.0
+        if veto.any():
+            print(f"Vetoed {int(veto.sum())} comparison star(s) with scatter "
+                  f">3x the best")
+    tot = weights.sum()
+    if tot > 0:
+        print("Ensemble weights: " + ", ".join(
+            f"G={c.mag:.2f} {100*w/tot:.0f}%" for c, w in zip(comps, weights)))
+    norm, err = ph.differential_curve(tflux, cflux, weights=weights)
 
     times = np.array(times, dtype=float)
     good = ph.clean_curve(times, norm)
@@ -248,9 +265,21 @@ def cmd_run(args):
         print(f"  duration     {res.duration_days*24:.2f} h")
         print(f"  residual RMS {res.rms_ppm:.0f} ppm")
         if args.predicted_mid:
-            oc = o_minus_c_minutes(res.mid_bjd, args.predicted_mid)
+            pred = args.predicted_mid
+            if args.pred_system == "jd_utc":
+                if args.lat is None or args.lon is None:
+                    raise SystemExit(
+                        "--predicted-mid-system jd_utc needs --lat/--lon to "
+                        "convert the prediction to BJD_TDB.")
+                from .timing import jd_utc_to_bjd_tdb
+                pred = float(jd_utc_to_bjd_tdb(
+                    np.array([pred]), args.ra, args.dec,
+                    args.lat, args.lon, args.elevation)[0])
+                print(f"  prediction converted JD(UTC) -> BJD_TDB "
+                      f"({(pred - args.predicted_mid)*24*60:+.2f} min)")
+            oc = o_minus_c_minutes(res.mid_bjd, pred)
             print(f"  O-C          {oc:+.2f} min "
-                  f"({'late' if oc > 0 else 'early'})")
+                  f"({'late' if oc > 0 else 'early'}) [both BJD_TDB]")
 
         from .export import write_lightcurve, write_summary
         meta = {"target_ra_deg": args.ra, "target_dec_deg": args.dec,
@@ -337,7 +366,13 @@ def main():
     r.add_argument("--elevation", type=float, default=0.0)
     r.add_argument("--fit", action="store_true", help="fit the transit model")
     r.add_argument("--predicted-mid", type=float,
-                   help="predicted mid-transit BJD_TDB, for O-C")
+                   help="predicted mid-transit time, for O-C")
+    r.add_argument("--predicted-mid-system", dest="pred_system",
+                   choices=["bjd_tdb", "jd_utc"], default="bjd_tdb",
+                   help="time system of --predicted-mid. AstroImageJ reports "
+                        "geocentric JD(UTC); the NASA archive reports BJD_TDB. "
+                        "Mixing them biases O-C by the barycentric correction, "
+                        "up to 8 minutes.")
     r.add_argument("--duration-hours", type=float)
     r.add_argument("--depth-ppm", type=float)
     r.add_argument("--plot", help="write a PNG light curve to this path")

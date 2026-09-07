@@ -236,101 +236,54 @@ def frame_time(header: dict) -> float:
     return Time(t, format="isot", scale="utc").jd + (exp / 2) / 86400.0
 
 
-def differential_curve(target_flux: np.ndarray, comp_flux: np.ndarray
+def differential_curve(target_flux: np.ndarray, comp_flux: np.ndarray,
+                       weights: np.ndarray | None = None
                        ) -> tuple[np.ndarray, np.ndarray]:
     """
-    Ensemble differential photometry: divide the target by the summed
-    comparison flux, then normalize to the out-of-transit median.
+    Ensemble differential photometry: divide the target by a weighted sum of
+    the comparison fluxes, then normalize to the median.
+
+    Weighting rather than hard-dropping matters. A noisy comparison star
+    still carries real signal about transparency; excluding it entirely
+    shrinks the ensemble and raises its shot noise. Weighting each star by
+    1/scatter^2 keeps that information while limiting the damage a poor
+    star can do.
 
     comp_flux: (n_comps, n_frames)
-    Returns (normalized flux, per-point uncertainty estimate).
+    weights:   (n_comps,) relative weights; equal weighting if omitted
     """
-    ensemble = np.nansum(comp_flux, axis=0)
+    comp_flux = np.asarray(comp_flux, dtype=float)
+    if weights is None:
+        weights = np.ones(comp_flux.shape[0])
+    weights = np.asarray(weights, dtype=float)
+    weights = np.where(np.isfinite(weights) & (weights > 0), weights, 0.0)
+    if weights.sum() <= 0:
+        weights = np.ones(comp_flux.shape[0])
+    weights = weights / weights.sum()
+
+    # Scale each comparison to a common level before combining, so a bright
+    # star doesn't dominate purely by being bright.
+    levels = np.nanmedian(comp_flux, axis=1, keepdims=True)
+    levels[levels == 0] = np.nan
+    scaled = comp_flux / levels
+    ensemble = np.nansum(scaled * weights[:, None], axis=0)
+
     rel = target_flux / ensemble
     norm = rel / np.nanmedian(rel)
 
-    # Poisson-limited uncertainty propagated through the ratio
+    # Effective photon count of the weighted ensemble, for error propagation
+    eff_counts = np.nansum(comp_flux * weights[:, None], axis=0)
     with np.errstate(divide="ignore", invalid="ignore"):
         err = norm * np.sqrt(
             np.where(target_flux > 0, 1.0 / target_flux, np.nan)
-            + np.where(ensemble > 0, 1.0 / ensemble, np.nan)
+            + np.where(eff_counts > 0, 1.0 / eff_counts, np.nan)
         )
     return norm, err
 
 
-def filter_session_frames(paths, headers=None, max_gap_hours: float = 6.0):
-    """
-    Keep only frames belonging to the main observing session.
-
-    Folders accumulate strays — a test frame from another night, a file
-    copied in by mistake. Those carry timestamps days away from the session
-    and would stretch the light curve's time axis into uselessness. This
-    finds the largest cluster of frames in time and returns just those.
-    """
-    times = []
-    for p in paths:
-        try:
-            times.append(frame_time(fits.getheader(p)))
-        except Exception:                        # noqa: BLE001
-            times.append(np.nan)
-    times = np.array(times, dtype=float)
-    ok = np.isfinite(times)
-    if ok.sum() < 2:
-        return list(paths), []
-
-    order = np.argsort(np.where(ok, times, np.inf))
-    sorted_t = times[order]
-    # split wherever consecutive frames are further apart than max_gap
-    gaps = np.diff(sorted_t) > (max_gap_hours / 24.0)
-    group_id = np.concatenate([[0], np.cumsum(gaps)])
-    counts = np.bincount(group_id[: ok.sum()])
-    main = int(np.argmax(counts))
-
-    keep_idx = set(order[: ok.sum()][group_id[: ok.sum()] == main])
-    kept = [paths[i] for i in range(len(paths)) if i in keep_idx]
-    dropped = [paths[i] for i in range(len(paths)) if i not in keep_idx]
-    return kept, dropped
-
-
-def clean_curve(times, flux, err=None, sigma: float = 5.0):
-    """
-    Drop frames whose relative flux is a wild outlier.
-
-    Necessary because a single frame with a corrupted measurement (empty
-    aperture, satellite trail, cloud) produces a ratio orders of magnitude
-    from unity, and least-squares fitting will happily wreck the whole model
-    chasing it. Uses MAD, so a contiguous block of bad frames can't inflate
-    the threshold and hide itself.
-    """
-    times = np.asarray(times, float)
-    flux = np.asarray(flux, float)
-    good = np.isfinite(times) & np.isfinite(flux) & (flux > 0)
-    if good.sum() < 5:
-        return good
-
-    med = np.median(flux[good])
-    mad = 1.4826 * np.median(np.abs(flux[good] - med))
-    if mad <= 0:
-        return good
-    good &= np.abs(flux - med) < sigma * mad
-    return good
-
-
-def normalize_out_of_transit(times, flux, mid=None, duration_days=None):
-    """
-    Normalize to the OUT-OF-TRANSIT baseline when the transit window is
-    known, rather than to the median of everything.
-
-    Matters more than it sounds: if most of your frames fall inside the
-    transit — easy to do when the session is short — the global median sits
-    partway down the dip, the baseline reads high, and the measured depth
-    comes out wrong.
-    """
-    times = np.asarray(times, float)
-    flux = np.asarray(flux, float)
-    if mid is None or duration_days is None:
-        ref = np.nanmedian(flux)
-    else:
-        oot = np.abs(times - mid) > (duration_days / 2.0)
-        ref = np.nanmedian(flux[oot]) if oot.sum() >= 5 else np.nanmedian(flux)
-    return flux / ref if np.isfinite(ref) and ref != 0 else flux
+def weights_from_scatter(scatter_ppm: np.ndarray, floor_ppm: float = 500.0
+                         ) -> np.ndarray:
+    """Inverse-variance weights from each comparison's differential scatter."""
+    sc = np.asarray(scatter_ppm, dtype=float)
+    sc = np.where(np.isfinite(sc) & (sc > floor_ppm), sc, floor_ppm)
+    return 1.0 / sc ** 2
