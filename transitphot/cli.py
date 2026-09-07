@@ -45,8 +45,8 @@ def cmd_run(args):
     # All products land in one folder per target, so a night's results stay
     # together instead of scattering across the working directory.
     stem = Path(args.out).stem
-    folder = Path(args.outdir) if args.outdir else Path(
-        args.target_name or f"target_{args.ra:.4f}{args.dec:+.4f}")
+    folder = (Path(args.outdir) if args.outdir else Path(
+        args.target_name or f"target_{args.ra:.4f}{args.dec:+.4f}")).resolve()
     folder.mkdir(parents=True, exist_ok=True)
     args.out = str(folder / Path(args.out).name)
     if args.plot:
@@ -239,23 +239,30 @@ def cmd_run(args):
 
     # --- validation artifacts: see exactly what was measured ---
     if ref_snapshot is not None:
-        from .annotate import (make_finder_chart, write_region_file,
-                               save_reference_frame)
-        rdata, rhdr, rpos, (r_ap, r_in, r_out) = ref_snapshot
-        labels = [f"C{i+1} G={c.mag:.1f}" for i, c in enumerate(comps)]
-        base = Path(args.out).with_suffix("")
-        chart = make_finder_chart(rdata, rpos[0], rpos[1:], r_ap, r_in, r_out,
-                                  out=base.with_name(base.name + "_finder.png"),
-                                  comp_labels=labels,
-                                  title=f"Aperture placement — RA {args.ra} Dec {args.dec}")
-        reg = write_region_file(base.with_name(base.name + "_apertures.reg"),
-                                rpos[0], rpos[1:], r_ap, r_in, r_out,
-                                comp_labels=[f"C{i+1}" for i in range(len(comps))])
-        ref = save_reference_frame(rdata, rhdr,
-                                   base.with_name(base.name + "_reference.fits"))
-        print(f"Validation: {chart.name} (green=target, red=comparisons)")
-        print(f"            {reg.name} + {ref.name} — load the .reg over the "
-              f"FITS in DS9 or AstroImageJ to check placement at full resolution")
+      # Everything below is diagnostic. The measurement is already written;
+      # losing it because a PNG failed to save would be absurd, so failures
+      # here warn and move on.
+      try:
+          from .annotate import (make_finder_chart, write_region_file,
+                                 save_reference_frame)
+          rdata, rhdr, rpos, (r_ap, r_in, r_out) = ref_snapshot
+          labels = [f"C{i+1} G={c.mag:.1f}" for i, c in enumerate(comps)]
+          base = Path(args.out).with_suffix("")
+          chart = make_finder_chart(rdata, rpos[0], rpos[1:], r_ap, r_in, r_out,
+                                    out=base.with_name(base.name + "_finder.png"),
+                                    comp_labels=labels,
+                                    title=f"Aperture placement — RA {args.ra} Dec {args.dec}")
+          reg = write_region_file(base.with_name(base.name + "_apertures.reg"),
+                                  rpos[0], rpos[1:], r_ap, r_in, r_out,
+                                  comp_labels=[f"C{i+1}" for i in range(len(comps))])
+          ref = save_reference_frame(rdata, rhdr,
+                                     base.with_name(base.name + "_reference.fits"))
+          print(f"Validation: {chart.name} (green=target, red=comparisons)")
+          print(f"            {reg.name} + {ref.name} — load the .reg over the "
+                f"FITS in DS9 or AstroImageJ to check placement at full resolution")
+      except Exception as exc:                          # noqa: BLE001
+        print(f"WARNING: could not write validation artifacts ({exc}). "
+              f"The light curve and fit are unaffected.")
 
     # Predicted mid-time from the archive ephemeris, for whichever transit
     # this session actually covers.
@@ -312,39 +319,42 @@ def cmd_run(args):
             print(f"  O-C          {oc:+.2f} min "
                   f"({'late' if oc > 0 else 'early'}) [both BJD_TDB]")
 
-        from .export import write_lightcurve, write_summary
-        meta = {"target_ra_deg": args.ra, "target_dec_deg": args.dec,
-                "n_comparison_stars": int(keep.sum()),
-                "time_system": "BJD_TDB" if args.lat is not None else "JD_UTC"}
-        base = Path(args.out).with_suffix("")
-        write_lightcurve(base.with_suffix(".txt"), bjd, norm, err, meta)
-        write_summary(base.with_name(base.name + "_summary.json"), res, meta,
-                      args.predicted_mid)
-        print(f"  wrote {base.with_suffix('.txt').name} and "
-              f"{base.name}_summary.json")
+        try:
+            from .export import write_lightcurve, write_summary
+            meta = {"target_ra_deg": args.ra, "target_dec_deg": args.dec,
+                    "n_comparison_stars": int(keep.sum()),
+                    "time_system": "BJD_TDB" if args.lat is not None else "JD_UTC"}
+            base = Path(args.out).with_suffix("")
+            write_lightcurve(base.with_suffix(".txt"), bjd, norm, err, meta)
+            write_summary(base.with_name(base.name + "_summary.json"), res, meta,
+                          args.predicted_mid)
+            print(f"  wrote {base.with_suffix('.txt').name} and "
+                  f"{base.name}_summary.json")
 
-        if args.plot:
-            from .plotting import plot_lightcurve
-            from .timing import meridian_crossing
-            mer = None
-            if args.lat is not None and args.lon is not None:
-                mer_jd = meridian_crossing(times, args.ra, args.lat, args.lon)
-                if mer_jd is not None:
-                    # convert to the same axis the curve is plotted on
-                    from .timing import jd_utc_to_bjd_tdb
-                    mer = float(jd_utc_to_bjd_tdb(
-                        np.array([mer_jd]), args.ra, args.dec,
-                        args.lat, args.lon, args.elevation)[0])
-                    print(f"  meridian crossing at {mer:.5f} BJD_TDB")
-            plot_lightcurve(bjd, norm, err, res,
-                            title=f"RA {args.ra} Dec {args.dec}",
-                            out=Path(args.plot),
-                            predicted_mid=(pred if args.predicted_mid else None),
-                            duration_days=(args.duration_hours / 24.0
-                                           if args.duration_hours else None),
-                            meridian_bjd=mer)
-            print(f"  wrote {args.plot}")
-
+            if args.plot:
+                from .plotting import plot_lightcurve
+                from .timing import meridian_crossing
+                mer = None
+                if args.lat is not None and args.lon is not None:
+                    mer_jd = meridian_crossing(times, args.ra, args.lat, args.lon)
+                    if mer_jd is not None:
+                        # convert to the same axis the curve is plotted on
+                        from .timing import jd_utc_to_bjd_tdb
+                        mer = float(jd_utc_to_bjd_tdb(
+                            np.array([mer_jd]), args.ra, args.dec,
+                            args.lat, args.lon, args.elevation)[0])
+                        print(f"  meridian crossing at {mer:.5f} BJD_TDB")
+                plot_lightcurve(bjd, norm, err, res,
+                                title=f"RA {args.ra} Dec {args.dec}",
+                                out=Path(args.plot),
+                                predicted_mid=(pred if args.predicted_mid else None),
+                                duration_days=(args.duration_hours / 24.0
+                                               if args.duration_hours else None),
+                                meridian_bjd=mer)
+                print(f"  wrote {args.plot}")
+        except Exception as exc:                        # noqa: BLE001
+            print(f"WARNING: could not write outputs or plot ({exc}).")
+            print("The fitted values printed above are still valid.")
 
 def cmd_check(args):
     from .solve import inspect_dir
