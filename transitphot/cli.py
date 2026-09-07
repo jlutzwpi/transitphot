@@ -193,9 +193,28 @@ def cmd_run(args):
     if tot > 0:
         print("Ensemble weights: " + ", ".join(
             f"G={c.mag:.2f} {100*w/tot:.0f}%" for c, w in zip(comps, weights)))
+    # Drop cloud-hit frames before building the curve: they carry a fraction
+    # of the photons and dominate the noise budget.
+    tmask, transp = ph.transparency_mask(cflux, min_fraction=args.min_transparency)
+    if (~tmask).any():
+        print(f"Dropping {int((~tmask).sum())} frame(s) below "
+              f"{args.min_transparency:.0%} transparency (cloud)")
+        tflux, cflux = tflux[tmask], cflux[:, tmask]
+        times = list(np.asarray(times, float)[tmask])
+
     norm, err = ph.differential_curve(tflux, cflux, weights=weights)
 
     times = np.array(times, dtype=float)
+    if args.trim_start or args.trim_end:
+        t0, t1 = times.min(), times.max()
+        keep_t = np.ones(len(times), bool)
+        if args.trim_start:
+            keep_t &= times >= t0 + args.trim_start / 1440.0
+        if args.trim_end:
+            keep_t &= times <= t1 - args.trim_end / 1440.0
+        print(f"Trimmed {int((~keep_t).sum())} point(s) from the session ends")
+        times, norm, err = times[keep_t], norm[keep_t], err[keep_t]
+
     good = ph.clean_curve(times, norm)
     if good.sum() < len(good):
         print(f"Clipped {len(good) - good.sum()} outlier point(s) from the curve")
@@ -254,6 +273,7 @@ def cmd_run(args):
         from .fitting import fit as fit_transit, o_minus_c_minutes
         res = fit_transit(
             bjd, norm, err,
+            fix_duration=args.fix_duration,
             expected_mid=args.predicted_mid,
             expected_duration_hours=args.duration_hours,
             expected_depth=(args.depth_ppm / 1e6) if args.depth_ppm else None,
@@ -378,6 +398,17 @@ def main():
     r.add_argument("--plot", help="write a PNG light curve to this path")
     r.add_argument("--fwhm", type=float,
                    help="override the measured session FWHM, in pixels")
+    r.add_argument("--min-transparency", type=float, default=0.6,
+                   dest="min_transparency",
+                   help="drop frames whose summed comparison flux falls below "
+                        "this fraction of the session median (cloud)")
+    r.add_argument("--trim-start", type=float, default=0.0, dest="trim_start",
+                   help="discard this many minutes from the start of the run")
+    r.add_argument("--trim-end", type=float, default=0.0, dest="trim_end",
+                   help="discard this many minutes from the end of the run")
+    r.add_argument("--fix-duration", action="store_true", dest="fix_duration",
+                   help="hold transit duration at --duration-hours; removes a "
+                        "degeneracy that destabilizes fits on noisy data")
     r.add_argument("--aperture-scale", type=float, dest="aperture_scale",
                    help="fix the aperture at this multiple of FWHM instead "
                         "of scanning for the best")

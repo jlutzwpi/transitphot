@@ -366,3 +366,24 @@ def normalize_out_of_transit(times, flux, mid=None, duration_days=None):
         else:
             ref = np.nanmedian(flux)
     return flux / ref if np.isfinite(ref) and ref != 0 else flux
+
+
+def transparency_mask(comp_flux: np.ndarray, min_fraction: float = 0.6):
+    """
+    Flag frames taken through significant cloud.
+
+    The summed comparison flux is a direct transparency meter: when cloud
+    passes, every star dims together. Differential photometry corrects the
+    *level*, but not the lost signal-to-noise — a frame at 30% transparency
+    has roughly a third the photons and several times the scatter, and it
+    contributes far more noise than information.
+
+    Returns a boolean mask of frames to keep, plus the transparency series.
+    """
+    comp_flux = np.asarray(comp_flux, dtype=float)
+    total = np.nansum(comp_flux, axis=0)
+    ref = np.nanmedian(total)
+    if not np.isfinite(ref) or ref <= 0:
+        return np.ones(total.shape, dtype=bool), np.ones_like(total)
+    frac = total / ref
+    return frac > min_fraction, frac

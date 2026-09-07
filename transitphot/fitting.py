@@ -69,7 +69,8 @@ def trapezoid(t, mid, depth, duration, ingress, base, slope):
 def fit(bjd: np.ndarray, flux: np.ndarray, flux_err: np.ndarray | None = None,
         expected_mid: float | None = None,
         expected_duration_hours: float | None = None,
-        expected_depth: float | None = None) -> TransitFit:
+        expected_depth: float | None = None,
+        fix_duration: bool = False) -> TransitFit:
     """
     Fit the trapezoid model. Priors from TransitPlanner's prediction make the
     fit far more stable on marginal data — pass them when you have them.
@@ -102,6 +103,11 @@ def fit(bjd: np.ndarray, flux: np.ndarray, flux_err: np.ndarray | None = None,
     # mid-transit beyond the data has not measured anything.
     lo = [x.min(), 1e-5, dur0 * 0.3, 1e-4, 0.9, -5.0]
     hi = [x.max(), 0.5,  dur0 * 3.0, dur0,  1.1,  5.0]
+    if fix_duration and expected_duration_hours:
+        # Duration is well known from the archive and trades against depth
+        # and mid-time in a noisy fit. Pinning it removes a degeneracy that
+        # otherwise lets the model wander onto a trend instead of the transit.
+        lo[2], hi[2] = dur0 * 0.999, dur0 * 1.001
 
     # Multi-start: the prior, plus a scan across the observed window.
     starts = [mid0] + list(np.linspace(x.min() + dur0 / 2,
