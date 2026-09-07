@@ -24,7 +24,10 @@ enough to share, and only if you choose to.
     # 4. Extract a differential light curve
     transitphot run --lights ./lights/calibrated \
         --ra 343.0415 --dec 35.4471 --target-mag 12.4 \
-        --out wasp10b.csv
+        --target-name WASP-10b --out wasp10b.csv
+
+All products (light curve, fit summary, plots, finder chart, region file)
+are written into a folder named for the target.
 
 Frames must be plate-solved so the pipeline can find your target and
 comparison stars by coordinate. ASIAIR and similar controllers solve for

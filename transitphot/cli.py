@@ -41,6 +41,17 @@ def cmd_run(args):
     paths = sorted(Path(args.lights).glob("*.fit*"))
     if not paths:
         raise SystemExit(f"No FITS files in {args.lights}")
+    # All products land in one folder per target, so a night's results stay
+    # together instead of scattering across the working directory.
+    stem = Path(args.out).stem
+    folder = Path(args.outdir) if args.outdir else Path(
+        args.target_name or f"target_{args.ra:.4f}{args.dec:+.4f}")
+    folder.mkdir(parents=True, exist_ok=True)
+    args.out = str(folder / Path(args.out).name)
+    if args.plot:
+        args.plot = str(folder / Path(args.plot).name)
+    print(f"Results -> {folder.resolve()}")
+
     paths, strays = ph.filter_session_frames(paths)
     if strays:
         print(f"Ignoring {len(strays)} frame(s) outside the main session "
@@ -271,7 +282,11 @@ def main():
     r.add_argument("--filter", dest="filter_band",
                    help="filter used (R, L, V...) — relaxes the color match "
                         "criterion for narrower bands")
-    r.add_argument("--out", default="lightcurve.csv")
+    r.add_argument("--out", default="lightcurve.csv",
+                   help="output filename; written inside the results folder")
+    r.add_argument("--target-name", dest="target_name",
+                   help="target name — used as the results folder name")
+    r.add_argument("--outdir", help="results folder (default: ./<target-name>)")
     r.add_argument("--lat", type=float, help="site latitude (enables BJD_TDB)")
     r.add_argument("--lon", type=float, help="site longitude, east positive")
     r.add_argument("--elevation", type=float, default=0.0)
