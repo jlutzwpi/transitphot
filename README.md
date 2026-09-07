@@ -6,6 +6,14 @@ Companion to [TransitPlanner](https://transits.justinlutz.com).
 Your data stays on your machine — only the finished light curve is small
 enough to share, and only if you choose to.
 
+## GUI
+
+    transitphot-gui
+
+Point it at your lights/bias/darks/flats folders, enter (or look up) the
+target, then Calibrate -> Check WCS -> Run. Output streams into the window;
+settings persist between sessions. Tkinter only, no extra dependencies.
+
 ## Install
 
     pip install -e .

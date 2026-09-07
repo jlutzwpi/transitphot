@@ -21,6 +21,9 @@ align = ["astroalign>=2.5"]
 [project.scripts]
 transitphot = "transitphot.cli:main"
 
+[project.gui-scripts]
+transitphot-gui = "transitphot.gui:main"
+
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
