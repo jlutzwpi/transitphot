@@ -155,13 +155,65 @@ def select(target_ra: float, target_dec: float, target_mag: float,
 
 def check_stability(fluxes: np.ndarray, threshold: float = 0.02) -> np.ndarray:
     """
-    Post-hoc check against the actual data: a comparison star whose
-    normalized flux scatters more than `threshold` (fractional) across the
-    session is misbehaving — clouds, drift onto a bad column, or genuine
-    variability. Returns a boolean mask of stars to keep.
+    Post-hoc check against the actual data, measured DIFFERENTIALLY.
 
-    fluxes: (n_stars, n_frames) array of measured fluxes.
+    Critical subtlety: clouds, transparency changes and airmass dim every
+    star in the field together. Differential photometry divides that out, so
+    common-mode variation is exactly what we must NOT penalize. An earlier
+    version of this function tested each star's raw flux scatter and rejected
+    every comparison on a partly cloudy night — discarding good data for the
+    one reason that doesn't matter.
+
+    So: normalize each star against the ensemble of the *others*, then test
+    the residual scatter. That isolates variation intrinsic to the star (real
+    variability, drift onto a bad column, a satellite trail) from variation
+    shared by the whole field.
+
+    fluxes: (n_stars, n_frames)
+    Returns a boolean mask of stars to keep.
     """
-    norm = fluxes / np.nanmedian(fluxes, axis=1, keepdims=True)
-    scatter = np.nanstd(norm, axis=1)
-    return scatter < threshold
+    fluxes = np.asarray(fluxes, dtype=float)
+    n_stars = fluxes.shape[0]
+    if n_stars == 1:
+        return np.array([True])
+
+    scatters = np.full(n_stars, np.nan)
+    for i in range(n_stars):
+        others = np.delete(fluxes, i, axis=0)
+        ensemble = np.nansum(others, axis=0)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ratio = fluxes[i] / ensemble
+        med = np.nanmedian(ratio)
+        if not np.isfinite(med) or med == 0:
+            continue
+        norm = ratio / med
+        # robust scatter: MAD isn't thrown off by a few bad frames
+        scatters[i] = 1.4826 * np.nanmedian(np.abs(norm - 1.0))
+
+    finite = np.isfinite(scatters)
+    keep = finite & (scatters < threshold)
+    if keep.sum() == 0 and finite.any():
+        # Everything looked marginal (a genuinely rough night). Keep the best
+        # half rather than failing outright — a noisy curve beats no curve,
+        # and the reported scatter tells the user what they got.
+        order = np.argsort(np.where(finite, scatters, np.inf))
+        keep[order[:max(n_stars // 2, 1)]] = True
+    return keep
+
+
+def stability_report(fluxes: np.ndarray) -> np.ndarray:
+    """Differential scatter per star, in ppm — for reporting to the user."""
+    fluxes = np.asarray(fluxes, dtype=float)
+    out = np.full(fluxes.shape[0], np.nan)
+    for i in range(fluxes.shape[0]):
+        others = np.delete(fluxes, i, axis=0)
+        if others.size == 0:
+            continue
+        ensemble = np.nansum(others, axis=0)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ratio = fluxes[i] / ensemble
+        med = np.nanmedian(ratio)
+        if np.isfinite(med) and med != 0:
+            norm = ratio / med
+            out[i] = 1.4826 * np.nanmedian(np.abs(norm - 1.0)) * 1e6
+    return out

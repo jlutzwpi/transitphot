@@ -29,6 +29,11 @@ def cmd_calibrate(args):
 
 
 def cmd_run(args):
+    import warnings
+    from astropy.wcs import FITSFixedWarning
+    # ASIAIR headers lack MJD-OBS; astropy derives it from DATE-OBS and says
+    # so for every frame. Correct behavior, useless as 243 lines of output.
+    warnings.simplefilter("ignore", FITSFixedWarning)
     from . import photometry as ph
     from . import compstars as cs
     from astropy.io import fits
@@ -36,6 +41,10 @@ def cmd_run(args):
     paths = sorted(Path(args.lights).glob("*.fit*"))
     if not paths:
         raise SystemExit(f"No FITS files in {args.lights}")
+    paths, strays = ph.filter_session_frames(paths)
+    if strays:
+        print(f"Ignoring {len(strays)} frame(s) outside the main session "
+              f"(e.g. {strays[0].name})")
     print(f"{len(paths)} frames")
 
     hdr0 = fits.getheader(paths[0])
@@ -77,12 +86,17 @@ def cmd_run(args):
     tflux = np.array(tflux)
     cflux = np.array(cflux).T                       # (n_comps, n_frames)
 
+    scatter_ppm = cs.stability_report(cflux)
     keep = cs.check_stability(cflux)
+    print("Comparison star stability (differential scatter):")
+    for c, sc, k in zip(comps, scatter_ppm, keep):
+        mark = "kept   " if k else "dropped"
+        print(f"  {mark} G={c.mag:.2f}  {sc:7.0f} ppm")
     if keep.sum() == 0:
-        raise SystemExit("All comparison stars failed the stability check — "
-                         "likely cloud during the run.")
-    if keep.sum() < len(keep):
-        print(f"Dropped {len(keep) - keep.sum()} unstable comparison star(s)")
+        raise SystemExit(
+            "No usable comparison stars. This is rare — clouds alone should "
+            "not cause it, since transparency is common-mode and divides "
+            "out. Check the finder chart for aperture placement.")
     norm, err = ph.differential_curve(tflux, cflux[keep])
 
     out = Path(args.out)

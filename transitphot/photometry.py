@@ -16,10 +16,23 @@ from photutils.detection import DAOStarFinder
 
 
 def estimate_fwhm(data: np.ndarray, fwhm_guess: float = 4.0) -> float:
-    """Rough FWHM from detected sources; used to size apertures."""
+    """
+    Rough FWHM from detected sources; used to size apertures.
+
+    Falls back to the guess when detection fails — which happens on frames
+    taken through thick cloud, where there simply aren't enough sources above
+    threshold. Using a sane default keeps those frames in the series (they
+    will show up as low flux, which is correct) instead of aborting the run.
+    """
+    import warnings
     mean, median, std = sigma_clipped_stats(data, sigma=3.0)
-    finder = DAOStarFinder(fwhm=fwhm_guess, threshold=5.0 * std)
-    srcs = finder(data - median)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")          # NoDetectionsWarning is expected
+        try:
+            finder = DAOStarFinder(fwhm=fwhm_guess, threshold=5.0 * std)
+            srcs = finder(data - median)
+        except Exception:                        # noqa: BLE001
+            srcs = None
     if srcs is None or len(srcs) == 0:
         return fwhm_guess
     # DAOStarFinder's sharpness relates to profile width; use a robust proxy
@@ -131,3 +144,37 @@ def differential_curve(target_flux: np.ndarray, comp_flux: np.ndarray
             + np.where(ensemble > 0, 1.0 / ensemble, np.nan)
         )
     return norm, err
+
+
+def filter_session_frames(paths, headers=None, max_gap_hours: float = 6.0):
+    """
+    Keep only frames belonging to the main observing session.
+
+    Folders accumulate strays — a test frame from another night, a file
+    copied in by mistake. Those carry timestamps days away from the session
+    and would stretch the light curve's time axis into uselessness. This
+    finds the largest cluster of frames in time and returns just those.
+    """
+    times = []
+    for p in paths:
+        try:
+            times.append(frame_time(fits.getheader(p)))
+        except Exception:                        # noqa: BLE001
+            times.append(np.nan)
+    times = np.array(times, dtype=float)
+    ok = np.isfinite(times)
+    if ok.sum() < 2:
+        return list(paths), []
+
+    order = np.argsort(np.where(ok, times, np.inf))
+    sorted_t = times[order]
+    # split wherever consecutive frames are further apart than max_gap
+    gaps = np.diff(sorted_t) > (max_gap_hours / 24.0)
+    group_id = np.concatenate([[0], np.cumsum(gaps)])
+    counts = np.bincount(group_id[: ok.sum()])
+    main = int(np.argmax(counts))
+
+    keep_idx = set(order[: ok.sum()][group_id[: ok.sum()] == main])
+    kept = [paths[i] for i in range(len(paths)) if i in keep_idx]
+    dropped = [paths[i] for i in range(len(paths)) if i not in keep_idx]
+    return kept, dropped
