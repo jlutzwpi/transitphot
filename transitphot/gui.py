@@ -61,6 +61,8 @@ class App(tk.Tk):
         self.trim_end = tk.StringVar(value="0")
         self.proc: subprocess.Popen | None = None
         self.q: queue.Queue[str] = queue.Queue()
+        self.pending_plot: Path | None = None   # shown when the job succeeds
+        self.plot_win: tk.Toplevel | None = None
 
         self._build()
         self._load()
@@ -327,9 +329,11 @@ class App(tk.Tk):
             v = self.vars[key].get().strip()
             if v:
                 cmd += [flag, v]
+        self.pending_plot = None
         self._launch(cmd, "Calibrating…")
 
     def _check(self):
+        self.pending_plot = None
         self._launch(self._base_cmd("check") + ["--lights", self._calibrated_dir()],
                      "Checking WCS…")
 
@@ -368,6 +372,8 @@ class App(tk.Tk):
             if val and float(val) > 0:
                 cmd += [flag, val]
         self._save()
+        self.pending_plot = (self._results_dir()
+                             / f"{name.replace(' ', '_')}.png")
         self._launch(cmd, "Running photometry…")
 
     def _launch(self, cmd, status):
@@ -398,6 +404,7 @@ class App(tk.Tk):
                 self.q.put(line)
             code = self.proc.wait()
             self.q.put(f"\n[finished, exit code {code}]\n")
+            self.q.put(f"__CODE__{code}")
         except Exception as exc:                        # noqa: BLE001
             self.q.put(f"\n[error: {exc}]\n")
         finally:
@@ -412,16 +419,77 @@ class App(tk.Tk):
         try:
             while True:
                 item = self.q.get_nowait()
-                if item == "__DONE__":
+                if item.startswith("__CODE__"):
+                    self.last_code = int(item[len("__CODE__"):])
+                elif item == "__DONE__":
                     self.status.config(text="Ready")
                     for b in (self.btn_cal, self.btn_chk, self.btn_run):
                         b.config(state="normal")
                     self.btn_stop.config(state="disabled")
+                    # Show the light curve as soon as it exists — the plot is
+                    # the point of the run, and hunting for it in a folder
+                    # afterwards is friction at 2am.
+                    if (getattr(self, "last_code", 1) == 0
+                            and self.pending_plot
+                            and self.pending_plot.exists()):
+                        self._show_plot(self.pending_plot)
+                    self.pending_plot = None
                 else:
                     self._say(item)
         except queue.Empty:
             pass
         self.after(100, self._drain)
+
+    # ---------------- plot viewer ----------------
+    def _show_plot(self, path: Path):
+        """
+        Display the finished light curve in a window.
+
+        Tkinter reads GIF/PNG via PhotoImage on Python 3.13+, but older
+        builds and some PNG flavours fail — so fall back to the system image
+        viewer rather than showing an error. Either way the astronomer sees
+        their curve without going looking for it.
+        """
+        try:
+            img = tk.PhotoImage(file=str(path))
+        except Exception:                               # noqa: BLE001
+            self._open_path(path)
+            return
+
+        # Downscale to fit the screen; PhotoImage only does integer factors.
+        sw, sh = self.winfo_screenwidth() - 120, self.winfo_screenheight() - 200
+        factor = 1
+        while (img.width() // factor > sw or img.height() // factor > sh) \
+                and factor < 6:
+            factor += 1
+        if factor > 1:
+            img = img.subsample(factor, factor)
+
+        if self.plot_win is not None and self.plot_win.winfo_exists():
+            self.plot_win.destroy()
+        win = tk.Toplevel(self)
+        self.plot_win = win
+        win.title(path.name)
+        lbl = tk.Label(win, image=img, bd=0)
+        lbl.image = img                                 # keep a reference
+        lbl.pack()
+        bar = ttk.Frame(win)
+        bar.pack(fill="x", pady=4)
+        ttk.Button(bar, text="Open in image viewer",
+                   command=lambda: self._open_path(path)).pack(side="left", padx=6)
+        ttk.Button(bar, text="Open results folder",
+                   command=self._open_results).pack(side="left", padx=6)
+        ttk.Button(bar, text="Close", command=win.destroy).pack(side="right", padx=6)
+        self._say(f"\nOpened {path.name}\n")
+
+    def _open_path(self, path: Path):
+        if sys.platform.startswith("win"):
+            import os as _os
+            _os.startfile(str(path))                    # noqa: S606
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", str(path)])
+        else:
+            subprocess.Popen(["xdg-open", str(path)])
 
     # ---------------- settings ----------------
     def _save(self):
