@@ -18,16 +18,21 @@ from photutils.detection import DAOStarFinder
 
 
 def measure_fwhm(data: np.ndarray, xy: tuple[float, float],
-                 box: float = 20.0) -> float:
+                 box: float = 15.0) -> float:
     """
-    FWHM from the second moment of the star's own profile.
+    FWHM from the area of the star's half-maximum region.
 
-    Replaces an earlier ad-hoc formula based on DAOStarFinder's `sharpness`,
-    which had no physical basis and returned values that jittered frame to
-    frame. That mattered enormously: aperture radius was derived from it, so
-    the aperture changed size every frame, capturing a different fraction of
-    each star's flux and injecting tens of thousands of ppm of scatter into
-    the light curve.
+    Method: subtract the local background, find the peak, count pixels above
+    half the peak, and convert that area to an equivalent diameter
+    (FWHM = 2*sqrt(area/pi)).
+
+    Why not second moments: a moment calculation over a cutout is dominated
+    by whatever fills the cutout. With background noise present, the moment
+    of a 40x40 box returns sigma ~ 11 px regardless of the star, which is how
+    an earlier version reported FWHM 17 px for stars actually 4 px wide — and
+    sized apertures at 34 px, swallowing neighbors and sky. Half-max area
+    only counts pixels the star genuinely lights up, so noise contributes
+    almost nothing.
     """
     x, y = xy
     h, w = data.shape
@@ -37,21 +42,22 @@ def measure_fwhm(data: np.ndarray, xy: tuple[float, float],
         return float("nan")
 
     cut = data[y0:y1, x0:x1].astype(float)
-    _, med, _ = sigma_clipped_stats(cut, sigma=3.0)
+    _, med, std = sigma_clipped_stats(cut, sigma=3.0)
     sub = cut - med
-    sub[sub < 0] = 0
-    total = sub.sum()
-    if not np.isfinite(total) or total <= 0:
-        return float("nan")
+    peak = float(np.nanmax(sub))
+    if not np.isfinite(peak) or std <= 0 or peak < 5 * std:
+        return float("nan")                      # nothing bright enough here
 
+    # Count only pixels near the centre, so a neighbouring star in the corner
+    # of the cutout can't inflate the area.
+    py, px = np.unravel_index(int(np.nanargmax(sub)), sub.shape)
     yy, xx = np.mgrid[0:sub.shape[0], 0:sub.shape[1]]
-    cx = (sub * xx).sum() / total
-    cy = (sub * yy).sum() / total
-    varx = (sub * (xx - cx) ** 2).sum() / total
-    vary = (sub * (yy - cy) ** 2).sum() / total
-    sigma = math.sqrt(max((varx + vary) / 2.0, 1e-6))
-    fwhm = 2.3548 * sigma
-    return float(fwhm) if 1.0 < fwhm < 25.0 else float("nan")
+    near = ((xx - px) ** 2 + (yy - py) ** 2) < (box * 0.8) ** 2
+    area = int(np.sum((sub > 0.5 * peak) & near))
+    if area < 2:
+        return float("nan")
+    fwhm = 2.0 * math.sqrt(area / math.pi)
+    return float(fwhm) if 1.0 < fwhm < 20.0 else float("nan")
 
 
 def session_fwhm(paths, positions_fn, sample: int = 15,

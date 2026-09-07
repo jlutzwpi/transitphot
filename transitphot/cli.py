@@ -78,7 +78,11 @@ def cmd_run(args):
         except Exception:                            # noqa: BLE001
             return None
 
-    fwhm = ph.session_fwhm(paths, _target_xy)
+    fwhm = args.fwhm if args.fwhm else ph.session_fwhm(paths, _target_xy)
+    if not args.fwhm and not (1.5 <= fwhm <= 12.0):
+        print(f"WARNING: measured session FWHM {fwhm:.1f} px is outside the "
+              f"usual 2-8 px range. Check the finder chart; override with "
+              f"--fwhm <px> if it looks wrong.")
     R_AP, R_IN, R_OUT = 2.0 * fwhm, 3.5 * fwhm, 6.0 * fwhm
     print(f"Session FWHM {fwhm:.2f} px -> aperture {R_AP:.1f} px, "
           f"sky annulus {R_IN:.1f}-{R_OUT:.1f} px (fixed for all frames)")
@@ -307,6 +311,8 @@ def main():
     r.add_argument("--duration-hours", type=float)
     r.add_argument("--depth-ppm", type=float)
     r.add_argument("--plot", help="write a PNG light curve to this path")
+    r.add_argument("--fwhm", type=float,
+                   help="override the measured session FWHM, in pixels")
     r.set_defaults(func=cmd_run)
 
     k = sub.add_parser("check", help="report which frames have a usable WCS")
