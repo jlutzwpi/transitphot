@@ -88,6 +88,48 @@ def align_to_reference(paths: list[Path], reference: Path | None = None):
             print(f"[align] skipped {p.name}: {exc}")
 
 
+def refine_position(data: np.ndarray, xy: tuple[float, float], box: float = 12.0,
+                    min_snr: float = 3.0):
+    """
+    Refine a catalog-projected position onto the actual star, and verify a
+    star is really there.
+
+    Returns (x, y, ok). ok is False when no source is detectable at the
+    expected place — which happens when a frame carries a stale WCS (common
+    around a meridian flip), when cloud swallowed the field, or when the
+    target drifted off the sensor. Those frames must be dropped: measuring
+    empty sky produces a flux ratio that explodes and destroys the fit.
+    """
+    from photutils.centroids import centroid_com
+
+    x, y = xy
+    h, w = data.shape
+    x0, x1 = int(max(x - box, 0)), int(min(x + box, w))
+    y0, y1 = int(max(y - box, 0)), int(min(y + box, h))
+    if x1 - x0 < 4 or y1 - y0 < 4:
+        return x, y, False                      # off the sensor
+
+    cut = data[y0:y1, x0:x1].astype(float)
+    _, med, std = sigma_clipped_stats(cut, sigma=3.0)
+    peak = np.nanmax(cut) - med
+    if not np.isfinite(peak) or std <= 0 or peak < min_snr * std:
+        return x, y, False                      # nothing detectable here
+
+    sub = cut - med
+    sub[sub < 0] = 0
+    try:
+        cx, cy = centroid_com(sub)
+    except Exception:                           # noqa: BLE001
+        return x, y, False
+    if not (np.isfinite(cx) and np.isfinite(cy)):
+        return x, y, False
+    nx, ny = x0 + cx, y0 + cy
+    # a centroid that ran to the edge of the box is not a real detection
+    if abs(nx - x) > box * 0.8 or abs(ny - y) > box * 0.8:
+        return x, y, False
+    return float(nx), float(ny), True
+
+
 def measure(data: np.ndarray, positions: list[tuple[float, float]],
             r_ap: float, r_in: float, r_out: float) -> np.ndarray:
     """
@@ -178,3 +220,47 @@ def filter_session_frames(paths, headers=None, max_gap_hours: float = 6.0):
     kept = [paths[i] for i in range(len(paths)) if i in keep_idx]
     dropped = [paths[i] for i in range(len(paths)) if i not in keep_idx]
     return kept, dropped
+
+
+def clean_curve(times, flux, err=None, sigma: float = 5.0):
+    """
+    Drop frames whose relative flux is a wild outlier.
+
+    Necessary because a single frame with a corrupted measurement (empty
+    aperture, satellite trail, cloud) produces a ratio orders of magnitude
+    from unity, and least-squares fitting will happily wreck the whole model
+    chasing it. Uses MAD, so a contiguous block of bad frames can't inflate
+    the threshold and hide itself.
+    """
+    times = np.asarray(times, float)
+    flux = np.asarray(flux, float)
+    good = np.isfinite(times) & np.isfinite(flux) & (flux > 0)
+    if good.sum() < 5:
+        return good
+
+    med = np.median(flux[good])
+    mad = 1.4826 * np.median(np.abs(flux[good] - med))
+    if mad <= 0:
+        return good
+    good &= np.abs(flux - med) < sigma * mad
+    return good
+
+
+def normalize_out_of_transit(times, flux, mid=None, duration_days=None):
+    """
+    Normalize to the OUT-OF-TRANSIT baseline when the transit window is
+    known, rather than to the median of everything.
+
+    Matters more than it sounds: if most of your frames fall inside the
+    transit — easy to do when the session is short — the global median sits
+    partway down the dip, the baseline reads high, and the measured depth
+    comes out wrong.
+    """
+    times = np.asarray(times, float)
+    flux = np.asarray(flux, float)
+    if mid is None or duration_days is None:
+        ref = np.nanmedian(flux)
+    else:
+        oot = np.abs(times - mid) > (duration_days / 2.0)
+        ref = np.nanmedian(flux[oot]) if oot.sum() >= 5 else np.nanmedian(flux)
+    return flux / ref if np.isfinite(ref) and ref != 0 else flux

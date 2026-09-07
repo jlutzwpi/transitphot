@@ -98,8 +98,10 @@ def fit(bjd: np.ndarray, flux: np.ndarray, flux_err: np.ndarray | None = None,
     dep0 = expected_depth if expected_depth is not None else max(
         1.0 - float(np.percentile(flux, 5)), 1e-4)
 
-    lo = [x.min() - 0.05, 1e-5, dur0 * 0.3, 1e-4, 0.9, -5.0]
-    hi = [x.max() + 0.05, 0.5,  dur0 * 3.0, dur0,  1.1,  5.0]
+    # Mid-time must lie INSIDE the observed window: a fit that puts
+    # mid-transit beyond the data has not measured anything.
+    lo = [x.min(), 1e-5, dur0 * 0.3, 1e-4, 0.9, -5.0]
+    hi = [x.max(), 0.5,  dur0 * 3.0, dur0,  1.1,  5.0]
 
     # Multi-start: the prior, plus a scan across the observed window.
     starts = [mid0] + list(np.linspace(x.min() + dur0 / 2,
@@ -110,9 +112,11 @@ def fit(bjd: np.ndarray, flux: np.ndarray, flux_err: np.ndarray | None = None,
         p0 = [m, dep0, dur0, dur0 * 0.15, 1.0, 0.0]
         p0 = [float(np.clip(v, l, h)) for v, l, h in zip(p0, lo, hi)]
         try:
+            # soft_l1 loss: quadratic near zero, linear in the tails, so a
+            # few surviving outliers bend the fit instead of dictating it.
             popt, pcov = curve_fit(trapezoid, x, flux, p0=p0, bounds=(lo, hi),
                                    sigma=sigma, absolute_sigma=sigma is not None,
-                                   maxfev=20000)
+                                   loss="soft_l1", f_scale=0.01, maxfev=20000)
         except Exception:                               # noqa: BLE001
             continue
         resid = flux - trapezoid(x, *popt)
@@ -127,6 +131,14 @@ def fit(bjd: np.ndarray, flux: np.ndarray, flux_err: np.ndarray | None = None,
     # NOTE: with sigma=None, curve_fit already scales the covariance by
     # chi2/dof (absolute_sigma=False), so no further rescaling here — doing
     # it twice collapses the reported uncertainty to ~0.
+    #
+    # With a robust loss the covariance estimate is unreliable and can come
+    # back non-finite or absurdly large. A mid-time error bar is the number
+    # people submit, so when it looks broken we measure it directly by
+    # bootstrapping the residuals instead of reporting garbage.
+    span_days = float(x.max() - x.min())
+    if not np.isfinite(perr[0]) or perr[0] > span_days:
+        perr = _bootstrap_errors(x, flux, best, lo, hi, sigma)
 
     return TransitFit(
         mid_bjd=float(best[0]) + origin, mid_err_days=float(perr[0]),
@@ -142,3 +154,27 @@ def o_minus_c_minutes(observed_mid_bjd: float, predicted_mid_bjd: float
     """Observed minus Calculated, in minutes — the number that updates an
     ephemeris. Positive means the transit ran late."""
     return (observed_mid_bjd - predicted_mid_bjd) * 24 * 60
+
+
+def _bootstrap_errors(x, flux, popt, lo, hi, sigma, n_boot: int = 24):
+    """
+    Residual bootstrap: refit repeatedly on resampled residuals and take the
+    scatter of the recovered parameters. Slower than reading the covariance
+    matrix, but it reports what the data actually constrain.
+    """
+    rng = np.random.default_rng(12345)
+    model = trapezoid(x, *popt)
+    resid = flux - model
+    draws = []
+    for _ in range(n_boot):
+        sample = model + rng.choice(resid, size=len(resid), replace=True)
+        try:
+            p, _ = curve_fit(trapezoid, x, sample, p0=popt, bounds=(lo, hi),
+                             sigma=sigma, loss="soft_l1", f_scale=0.01,
+                             maxfev=20000)
+            draws.append(p)
+        except Exception:                               # noqa: BLE001
+            continue
+    if len(draws) < 5:
+        return np.full(len(popt), np.nan)
+    return np.std(np.array(draws), axis=0)

@@ -62,6 +62,7 @@ def cmd_run(args):
 
     times, tflux, cflux = [], [], []
     ref_snapshot = None          # (data, header, positions, aperture radii)
+    n_rejected = n_done = 0
     for p, data, hdr in ph.iter_frames(paths):
         try:
             tx, ty = ph.sky_to_pixel(hdr, args.ra, args.dec)
@@ -76,12 +77,30 @@ def cmd_run(args):
                 f"--dec {args.dec}")
         fwhm = ph.estimate_fwhm(data)
         r_ap, r_in, r_out = 1.5 * fwhm, 3 * fwhm, 5 * fwhm
+
+        # Refine each catalog position onto the actual star. A frame where
+        # the target or a comparison isn't detectable has a bad WCS (stale
+        # solutions around a meridian flip are the usual cause) or was lost
+        # to cloud — measuring it would inject a wild flux ratio.
+        refined, all_ok = [], True
+        for xy in positions:
+            rx, ry, ok = ph.refine_position(data, xy)
+            refined.append((rx, ry))
+            all_ok &= ok
+        if not all_ok:
+            n_rejected += 1
+            continue
+        positions = refined
+
         if ref_snapshot is None:
             ref_snapshot = (data, hdr, positions, (r_ap, r_in, r_out))
         flux = ph.measure(data, positions, r_ap=r_ap, r_in=r_in, r_out=r_out)
         times.append(ph.frame_time(hdr))
         tflux.append(flux[0])
         cflux.append(flux[1:])
+        n_done += 1
+        if n_done % 25 == 0:
+            print(f"  measured {n_done}/{len(paths)} frames")
 
     tflux = np.array(tflux)
     cflux = np.array(cflux).T                       # (n_comps, n_frames)
@@ -97,7 +116,22 @@ def cmd_run(args):
             "No usable comparison stars. This is rare — clouds alone should "
             "not cause it, since transparency is common-mode and divides "
             "out. Check the finder chart for aperture placement.")
+    if n_rejected:
+        print(f"Rejected {n_rejected} frame(s): target or a comparison star "
+              f"was not detectable at its expected position "
+              f"(stale WCS, cloud, or off-sensor)")
     norm, err = ph.differential_curve(tflux, cflux[keep])
+
+    times = np.array(times, dtype=float)
+    good = ph.clean_curve(times, norm)
+    if good.sum() < len(good):
+        print(f"Clipped {len(good) - good.sum()} outlier point(s) from the curve")
+    times, norm, err = times[good], norm[good], err[good]
+
+    # Normalize against out-of-transit points when the window is known
+    if args.predicted_mid and args.duration_hours:
+        norm = ph.normalize_out_of_transit(
+            times, norm, args.predicted_mid, args.duration_hours / 24.0)
 
     out = Path(args.out)
     with out.open("w", newline="") as f:
@@ -130,7 +164,6 @@ def cmd_run(args):
         print(f"            {reg.name} + {ref.name} — load the .reg over the "
               f"FITS in DS9 or AstroImageJ to check placement at full resolution")
 
-    times = np.array(times)
     # --- BJD_TDB ---
     if args.lat is not None and args.lon is not None:
         from .timing import jd_utc_to_bjd_tdb
