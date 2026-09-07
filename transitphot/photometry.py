@@ -287,3 +287,82 @@ def weights_from_scatter(scatter_ppm: np.ndarray, floor_ppm: float = 500.0
     sc = np.asarray(scatter_ppm, dtype=float)
     sc = np.where(np.isfinite(sc) & (sc > floor_ppm), sc, floor_ppm)
     return 1.0 / sc ** 2
+
+
+def filter_session_frames(paths, headers=None, max_gap_hours: float = 6.0):
+    """
+    Keep only frames belonging to the main observing session.
+
+    Folders accumulate strays — a master calibration frame, a test shot from
+    another night, a file copied in by mistake. Those carry timestamps days
+    from the session and would stretch the light curve's time axis into
+    uselessness. This finds the largest cluster of frames in time and returns
+    just those, plus the ones it set aside.
+    """
+    times = []
+    for p in paths:
+        try:
+            times.append(frame_time(fits.getheader(p)))
+        except Exception:                            # noqa: BLE001
+            times.append(np.nan)
+    times = np.array(times, dtype=float)
+    ok = np.isfinite(times)
+    if ok.sum() < 2:
+        return list(paths), []
+
+    order = np.argsort(np.where(ok, times, np.inf))[: int(ok.sum())]
+    sorted_t = times[order]
+    gaps = np.diff(sorted_t) > (max_gap_hours / 24.0)
+    group_id = np.concatenate([[0], np.cumsum(gaps)])
+    counts = np.bincount(group_id)
+    main = int(np.argmax(counts))
+
+    keep_idx = {int(i) for i, g in zip(order, group_id) if g == main}
+    kept = [paths[i] for i in range(len(paths)) if i in keep_idx]
+    dropped = [paths[i] for i in range(len(paths)) if i not in keep_idx]
+    return kept, dropped
+
+
+def clean_curve(times, flux, err=None, sigma: float = 5.0):
+    """
+    Drop points whose relative flux is a wild outlier.
+
+    A single frame with a corrupted measurement (empty aperture, satellite
+    trail, cloud) produces a ratio far from unity, and least-squares fitting
+    will wreck the whole model chasing it. Uses MAD, so a contiguous block of
+    bad frames cannot inflate the threshold and hide itself.
+    """
+    times = np.asarray(times, float)
+    flux = np.asarray(flux, float)
+    good = np.isfinite(times) & np.isfinite(flux) & (flux > 0)
+    if good.sum() < 5:
+        return good
+
+    med = np.median(flux[good])
+    mad = 1.4826 * np.median(np.abs(flux[good] - med))
+    if mad <= 0:
+        return good
+    good &= np.abs(flux - med) < sigma * mad
+    return good
+
+
+def normalize_out_of_transit(times, flux, mid=None, duration_days=None):
+    """
+    Normalize to the out-of-transit baseline when the transit window is known.
+
+    If most frames fall inside the transit, a global median sits partway down
+    the dip: the baseline reads high and the measured depth comes out wrong.
+    Uses a sigma-clipped mean of the out-of-transit points so a cloudy tail
+    can't drag the reference either.
+    """
+    times = np.asarray(times, float)
+    flux = np.asarray(flux, float)
+    if mid is None or duration_days is None:
+        ref = np.nanmedian(flux)
+    else:
+        oot = np.abs(times - mid) > (duration_days / 2.0)
+        if oot.sum() >= 5:
+            _, ref, _ = sigma_clipped_stats(flux[oot], sigma=3.0)
+        else:
+            ref = np.nanmedian(flux)
+    return flux / ref if np.isfinite(ref) and ref != 0 else flux
