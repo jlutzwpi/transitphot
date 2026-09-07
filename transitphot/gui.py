@@ -88,23 +88,63 @@ class App(tk.Tk):
                   ).grid(row=4, column=0, columnspan=3, sticky="w", **pad)
 
         # --- Target tab ---
+        # Layout follows the order of work: name the target, look it up, and
+        # everything the archive knows fills in. Site details live in their
+        # own column because they are properties of the observer, not the
+        # target, and change on a completely different timescale.
         f2 = ttk.Frame(nb)
         nb.add(f2, text="Target && site")
-        for r, (key, label, _kind) in enumerate(FIELDS[4:]):
-            col = 0 if r < 6 else 2
-            row = r if r < 6 else r - 6
-            ttk.Label(f2, text=label).grid(row=row, column=col, sticky="w", **pad)
-            v = tk.StringVar()
-            self.vars[key] = v
-            ttk.Entry(f2, textvariable=v, width=22).grid(
-                row=row, column=col + 1, sticky="w", **pad)
+
+        ttk.Label(f2, text="Target name",
+                  font=("TkDefaultFont", 9, "bold")).grid(
+            row=0, column=0, sticky="w", **pad)
+        v = tk.StringVar()
+        self.vars["target_name"] = v
+        e = ttk.Entry(f2, textvariable=v, width=30)
+        e.grid(row=0, column=1, columnspan=2, sticky="w", **pad)
+        e.bind("<Return>", lambda _ev: self._lookup())
+
         ttk.Button(f2, text="Look up target in NASA archive",
-                   command=self._lookup).grid(row=6, column=0, columnspan=2,
-                                              sticky="w", **pad)
-        ttk.Label(f2, foreground="#555",
-                  text="Fills RA, Dec, magnitude, depth, duration, epoch and "
-                       "period from the target name."
-                  ).grid(row=6, column=2, columnspan=2, sticky="w", **pad)
+                   command=self._lookup).grid(row=1, column=1, sticky="w", **pad)
+        ttk.Label(f2, foreground="#555", justify="left",
+                  text=("Fills RA, Dec, magnitude, depth, duration, epoch and"
+                        " period below.\nNames look like 'Kepler-17 b'.")
+                  ).grid(row=1, column=2, columnspan=2, sticky="w", **pad)
+
+        ttk.Separator(f2, orient="horizontal").grid(
+            row=2, column=0, columnspan=4, sticky="ew", padx=6, pady=(10, 6))
+
+        ttk.Label(f2, text="Target", font=("TkDefaultFont", 9, "bold")).grid(
+            row=3, column=0, sticky="w", **pad)
+        target_fields = [("ra", "RA (deg)"), ("dec", "Dec (deg)"),
+                         ("target_mag", "Target mag (Gaia G)"),
+                         ("depth_ppm", "Expected depth (ppm)"),
+                         ("duration_hours", "Duration (hours)"),
+                         ("epoch_bjd", "Epoch (BJD_TDB)"),
+                         ("period", "Period (days)")]
+        for r, (key, label) in enumerate(target_fields, start=4):
+            ttk.Label(f2, text=label).grid(row=r, column=0, sticky="w", **pad)
+            var = tk.StringVar()
+            self.vars[key] = var
+            ttk.Entry(f2, textvariable=var, width=22).grid(
+                row=r, column=1, sticky="w", **pad)
+
+        ttk.Label(f2, text="Site && instrument",
+                  font=("TkDefaultFont", 9, "bold")).grid(
+            row=3, column=2, sticky="w", **pad)
+        site_fields = [("lat", "Latitude (deg)"),
+                       ("lon", "Longitude (deg, E+)"),
+                       ("elevation", "Elevation (m)"),
+                       ("filter_band", "Filter (R, L, V...)")]
+        for r, (key, label) in enumerate(site_fields, start=4):
+            ttk.Label(f2, text=label).grid(row=r, column=2, sticky="w", **pad)
+            var = tk.StringVar()
+            self.vars[key] = var
+            ttk.Entry(f2, textvariable=var, width=22).grid(
+                row=r, column=3, sticky="w", **pad)
+        ttk.Label(f2, foreground="#555", justify="left",
+                  text="Site values persist between sessions - enter them once."
+                  ).grid(row=8, column=2, columnspan=2, sticky="w", **pad)
 
         # --- Options tab ---
         f3 = ttk.Frame(nb)
