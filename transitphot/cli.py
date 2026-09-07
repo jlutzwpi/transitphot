@@ -10,6 +10,7 @@ transitphot — command line entry point.
 from __future__ import annotations
 
 import argparse
+import sys
 import csv
 from pathlib import Path
 
@@ -380,6 +381,17 @@ def cmd_solve(args):
 
 
 def main():
+    # Windows defaults stdout to cp1252, which cannot encode the characters
+    # used in the reports (Delta, multiplication sign, ellipsis). That is
+    # survivable in a console but fatal when output is piped — as it is from
+    # the GUI. Force UTF-8 and degrade gracefully if a character still can't
+    # be represented, rather than crashing a 20-minute run over a label.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:                               # noqa: BLE001
+            pass
+
     p = argparse.ArgumentParser(prog="transitphot",
                                 description="Local transit photometry pipeline")
     sub = p.add_subparsers(dest="cmd", required=True)

@@ -12,6 +12,7 @@ Launch with:  transitphot-gui
 from __future__ import annotations
 
 import json
+import os
 import queue
 import subprocess
 import sys
@@ -382,9 +383,14 @@ class App(tk.Tk):
 
     def _worker(self, cmd):
         try:
+            # Force UTF-8 in the child and decode as UTF-8 here. Without
+            # this, Windows hands the subprocess a cp1252 stdout and any
+            # non-Latin-1 character in the output kills the run.
+            env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1")
             self.proc = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, bufsize=1,
+                text=True, bufsize=1, encoding="utf-8", errors="replace",
+                env=env,
                 creationflags=(subprocess.CREATE_NO_WINDOW
                                if sys.platform.startswith("win") else 0),
             )
