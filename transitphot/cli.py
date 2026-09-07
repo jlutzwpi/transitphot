@@ -71,6 +71,18 @@ def cmd_run(args):
     for c in comps:
         print(f"  G={c.mag:.2f}  score {c.score}  ({'; '.join(c.reasons)})")
 
+    # One aperture for the whole session — see photometry.session_fwhm.
+    def _target_xy(hdr):
+        try:
+            return ph.sky_to_pixel(hdr, args.ra, args.dec)
+        except Exception:                            # noqa: BLE001
+            return None
+
+    fwhm = ph.session_fwhm(paths, _target_xy)
+    R_AP, R_IN, R_OUT = 2.0 * fwhm, 3.5 * fwhm, 6.0 * fwhm
+    print(f"Session FWHM {fwhm:.2f} px -> aperture {R_AP:.1f} px, "
+          f"sky annulus {R_IN:.1f}-{R_OUT:.1f} px (fixed for all frames)")
+
     times, tflux, cflux = [], [], []
     ref_snapshot = None          # (data, header, positions, aperture radii)
     n_rejected = n_done = 0
@@ -86,8 +98,7 @@ def cmd_run(args):
                 "  transitphot check --lights <dir>     # confirm\n"
                 f"  transitphot solve --lights <dir> --ra {args.ra} "
                 f"--dec {args.dec}")
-        fwhm = ph.estimate_fwhm(data)
-        r_ap, r_in, r_out = 1.5 * fwhm, 3 * fwhm, 5 * fwhm
+        r_ap, r_in, r_out = R_AP, R_IN, R_OUT
 
         # Refine each catalog position onto the actual star. A frame where
         # the target or a comparison isn't detectable has a bad WCS (stale

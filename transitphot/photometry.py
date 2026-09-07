@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import math
+
 import numpy as np
 from astropy.io import fits
 from astropy.stats import sigma_clipped_stats
@@ -15,29 +17,74 @@ from photutils.aperture import CircularAperture, CircularAnnulus, aperture_photo
 from photutils.detection import DAOStarFinder
 
 
-def estimate_fwhm(data: np.ndarray, fwhm_guess: float = 4.0) -> float:
+def measure_fwhm(data: np.ndarray, xy: tuple[float, float],
+                 box: float = 20.0) -> float:
     """
-    Rough FWHM from detected sources; used to size apertures.
+    FWHM from the second moment of the star's own profile.
 
-    Falls back to the guess when detection fails — which happens on frames
-    taken through thick cloud, where there simply aren't enough sources above
-    threshold. Using a sane default keeps those frames in the series (they
-    will show up as low flux, which is correct) instead of aborting the run.
+    Replaces an earlier ad-hoc formula based on DAOStarFinder's `sharpness`,
+    which had no physical basis and returned values that jittered frame to
+    frame. That mattered enormously: aperture radius was derived from it, so
+    the aperture changed size every frame, capturing a different fraction of
+    each star's flux and injecting tens of thousands of ppm of scatter into
+    the light curve.
     """
-    import warnings
-    mean, median, std = sigma_clipped_stats(data, sigma=3.0)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")          # NoDetectionsWarning is expected
+    x, y = xy
+    h, w = data.shape
+    x0, x1 = int(max(x - box, 0)), int(min(x + box, w))
+    y0, y1 = int(max(y - box, 0)), int(min(y + box, h))
+    if x1 - x0 < 6 or y1 - y0 < 6:
+        return float("nan")
+
+    cut = data[y0:y1, x0:x1].astype(float)
+    _, med, _ = sigma_clipped_stats(cut, sigma=3.0)
+    sub = cut - med
+    sub[sub < 0] = 0
+    total = sub.sum()
+    if not np.isfinite(total) or total <= 0:
+        return float("nan")
+
+    yy, xx = np.mgrid[0:sub.shape[0], 0:sub.shape[1]]
+    cx = (sub * xx).sum() / total
+    cy = (sub * yy).sum() / total
+    varx = (sub * (xx - cx) ** 2).sum() / total
+    vary = (sub * (yy - cy) ** 2).sum() / total
+    sigma = math.sqrt(max((varx + vary) / 2.0, 1e-6))
+    fwhm = 2.3548 * sigma
+    return float(fwhm) if 1.0 < fwhm < 25.0 else float("nan")
+
+
+def session_fwhm(paths, positions_fn, sample: int = 15,
+                 default: float = 4.0) -> float:
+    """
+    One FWHM for the whole session, from a sample of frames.
+
+    The aperture radius MUST be constant across the series. Aperture
+    photometry measures a fixed fraction of a star's light; if the aperture
+    changes size between frames, that fraction changes, and the resulting
+    flux variation is indistinguishable from a real signal. Seeing does vary
+    through a night, but a fixed aperture sized for the worst of it is far
+    better than one that tracks it.
+    """
+    vals = []
+    step = max(len(paths) // sample, 1)
+    for p in paths[::step][:sample]:
         try:
-            finder = DAOStarFinder(fwhm=fwhm_guess, threshold=5.0 * std)
-            srcs = finder(data - median)
-        except Exception:                        # noqa: BLE001
-            srcs = None
-    if srcs is None or len(srcs) == 0:
-        return fwhm_guess
-    # DAOStarFinder's sharpness relates to profile width; use a robust proxy
-    return float(np.clip(fwhm_guess * (1.0 / np.median(srcs["sharpness"]) / 3.0),
-                         2.0, 12.0))
+            data = fits.getdata(p).astype(float)
+            hdr = fits.getheader(p)
+            xy = positions_fn(hdr)
+            if xy is None:
+                continue
+            f = measure_fwhm(data, xy)
+            if np.isfinite(f):
+                vals.append(f)
+        except Exception:                            # noqa: BLE001
+            continue
+    if not vals:
+        return default
+    # 80th percentile: size for the poorer-seeing frames so no frame has its
+    # star spilling outside the aperture.
+    return float(np.percentile(vals, 80))
 
 
 def iter_frames(paths: list[Path]):
