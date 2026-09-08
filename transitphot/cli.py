@@ -289,9 +289,23 @@ def cmd_run(args):
     # --- fit ---
     if args.fit:
         from .fitting import fit as fit_transit, o_minus_c_minutes
+
+        # Airmass detrending: every session so far has shown a U-shaped
+        # baseline from differential extinction. Fitting it explicitly stops
+        # the transit parameters from absorbing it.
+        air = None
+        if args.detrend_airmass and args.lat is not None and args.lon is not None:
+            from .airmass import airmass_series, describe
+            air = airmass_series(times, args.ra, args.dec,
+                                 args.lat, args.lon, args.elevation)
+            print(f"  detrending against {describe(air)}")
+        elif args.detrend_airmass:
+            print("  airmass detrending needs --lat/--lon; skipped")
+
         res = fit_transit(
             bjd, norm, err,
             fix_duration=args.fix_duration,
+            airmass=air,
             expected_mid=args.predicted_mid,
             expected_duration_hours=args.duration_hours,
             expected_depth=(args.depth_ppm / 1e6) if args.depth_ppm else None,
@@ -302,6 +316,9 @@ def cmd_run(args):
         print(f"  depth        {res.depth_ppm:.0f} ± {res.depth_err*1e6:.0f} ppm")
         print(f"  duration     {res.duration_days*24:.2f} h")
         print(f"  residual RMS {res.rms_ppm:.0f} ppm")
+        if air is not None:
+            print(f"  extinction   k = {res.k_extinction:+.4f} mag/airmass "
+                  f"(residual colour mismatch with the comparisons)")
         ld_result = None
         if args.model in ("ld", "both") and args.period_days:
             from . import limbdark as _ld
@@ -541,13 +558,17 @@ def main():
                    help="transit model: 'trapezoid' (robust, depth reads ~10%% "
                         "low), 'ld' (limb-darkened, correct depth), or 'both' "
                         "to compare them on the same data")
+    r.add_argument("--no-detrend-airmass", action="store_false",
+                   dest="detrend_airmass",
+                   help="skip fitting a differential-extinction term against "
+                        "airmass (on by default when --lat/--lon are given)")
     r.add_argument("--fix-duration", action="store_true", dest="fix_duration",
                    help="hold transit duration at --duration-hours; removes a "
                         "degeneracy that destabilizes fits on noisy data")
     r.add_argument("--aperture-scale", type=float, dest="aperture_scale",
                    help="fix the aperture at this multiple of FWHM instead "
                         "of scanning for the best")
-    r.set_defaults(func=cmd_run)
+    r.set_defaults(func=cmd_run, detrend_airmass=True)
 
     y = sub.add_parser("sync", help="copy frames from the capture device, "
                                     "deferred until the session is over")

@@ -34,6 +34,7 @@ class TransitFit:
     ingress_days: float
     baseline_slope: float
     baseline_curve: float
+    k_extinction: float
     rms_ppm: float
     n_points: int
 
@@ -46,7 +47,8 @@ class TransitFit:
         return self.depth * 1e6
 
 
-def trapezoid(t, mid, depth, duration, ingress, base, slope, curve=0.0):
+def trapezoid(t, mid, depth, duration, ingress, base, slope, curve=0.0,
+              k_ext=0.0, airmass=None):
     """
     Trapezoidal transit multiplied by a quadratic baseline.
 
@@ -68,14 +70,19 @@ def trapezoid(t, mid, depth, duration, ingress, base, slope, curve=0.0):
     ramp = (np.abs(dt) > half_flat) & (np.abs(dt) < half_total)
     frac = (half_total - np.abs(dt)) / ingress
     f = np.where(ramp, 1.0 - depth * np.clip(frac, 0, 1), f)
-    return f * (base + slope * dt + curve * dt ** 2)
+    cont = base + slope * dt + curve * dt ** 2
+    if airmass is not None and k_ext:
+        X = np.asarray(airmass, dtype=float)
+        cont = cont * np.exp(-k_ext * (X - np.nanmedian(X)))
+    return f * cont
 
 
 def fit(bjd: np.ndarray, flux: np.ndarray, flux_err: np.ndarray | None = None,
         expected_mid: float | None = None,
         expected_duration_hours: float | None = None,
         expected_depth: float | None = None,
-        fix_duration: bool = False) -> TransitFit:
+        fix_duration: bool = False,
+        airmass: np.ndarray | None = None) -> TransitFit:
     """
     Fit the trapezoid model. Priors from TransitPlanner's prediction make the
     fit far more stable on marginal data — pass them when you have them.
@@ -112,6 +119,24 @@ def fit(bjd: np.ndarray, flux: np.ndarray, flux_err: np.ndarray | None = None,
     # baseline curvature instead of measuring a transit.
     lo = [x.min(), 1e-5, dur0 * 0.3, dur0 * 0.04, 0.9, -5.0, -50.0]
     hi = [x.max(), 0.5,  dur0 * 3.0, dur0 * 0.30, 1.1,  5.0,  50.0]
+
+    # With an airmass series available, fit a differential extinction
+    # coefficient instead of leaning on the time polynomial. Typical residual
+    # k for well colour-matched comparisons is a few hundredths of a
+    # magnitude per airmass; the bounds are generous but not unbounded.
+    # Airmass and the quadratic time term are degenerate over a short
+    # session — airmass IS very nearly quadratic in time around culmination —
+    # so fitting both lets them trade against each other and neither means
+    # anything. Use the airmass term when we have it, since it is the actual
+    # physics, and pin the quadratic to zero.
+    use_air = airmass is not None
+    if use_air:
+        air = np.asarray(airmass, dtype=float)[good]
+        lo[6], hi[6] = -1e-9, 1e-9          # curvature off
+        lo = lo + [-0.5]
+        hi = hi + [0.5]
+    else:
+        air = None
     if fix_duration and expected_duration_hours:
         # Duration is well known from the archive and trades against depth
         # and mid-time in a noisy fit. Pinning it removes a degeneracy that
@@ -125,16 +150,20 @@ def fit(bjd: np.ndarray, flux: np.ndarray, flux_err: np.ndarray | None = None,
     for m in starts:
         m = float(np.clip(m, lo[0] + 1e-6, hi[0] - 1e-6))
         p0 = [m, dep0, dur0, dur0 * 0.12, 1.0, 0.0, 0.0]
+        if use_air:
+            p0 = p0 + [0.0]
         p0 = [float(np.clip(v, l, h)) for v, l, h in zip(p0, lo, hi)]
+        model_fn = ((lambda tt, *pp: trapezoid(tt, *pp, airmass=air))
+                    if use_air else trapezoid)
         try:
             # soft_l1 loss: quadratic near zero, linear in the tails, so a
             # few surviving outliers bend the fit instead of dictating it.
-            popt, pcov = curve_fit(trapezoid, x, flux, p0=p0, bounds=(lo, hi),
+            popt, pcov = curve_fit(model_fn, x, flux, p0=p0, bounds=(lo, hi),
                                    sigma=sigma, absolute_sigma=sigma is not None,
                                    loss="soft_l1", f_scale=0.01, maxfev=20000)
         except Exception:                               # noqa: BLE001
             continue
-        resid = flux - trapezoid(x, *popt)
+        resid = flux - model_fn(x, *popt)
         chi2 = float(np.sum((resid / (sigma if sigma is not None else 1.0)) ** 2))
         if chi2 < best_chi2:
             best, best_chi2, best_cov, best_resid = popt, chi2, pcov, resid
@@ -148,12 +177,16 @@ def fit(bjd: np.ndarray, flux: np.ndarray, flux_err: np.ndarray | None = None,
     # robust solution and clipping the points it flagged as outliers, and
     # take the errors from that. This separates the two jobs: robustness for
     # the values, standard statistics for the error bars.
-    resid_r = flux - trapezoid(x, *best)
+    model_fn = ((lambda tt, *pp: trapezoid(tt, *pp, airmass=air))
+                if use_air else trapezoid)
+    resid_r = flux - model_fn(x, *best)
     s = 1.4826 * np.median(np.abs(resid_r - np.median(resid_r)))
     inl = np.abs(resid_r) < 4 * s if s > 0 else np.ones(len(x), bool)
     try:
+        ls_fn = ((lambda tt, *pp: trapezoid(tt, *pp, airmass=air[inl]))
+                 if use_air else trapezoid)
         _, cov_ls = curve_fit(
-            trapezoid, x[inl], flux[inl], p0=best, bounds=(lo, hi),
+            ls_fn, x[inl], flux[inl], p0=best, bounds=(lo, hi),
             sigma=(sigma[inl] if sigma is not None else None),
             absolute_sigma=sigma is not None, maxfev=20000)
         perr = np.sqrt(np.diag(cov_ls))
@@ -169,6 +202,7 @@ def fit(bjd: np.ndarray, flux: np.ndarray, flux_err: np.ndarray | None = None,
         depth=float(best[1]), depth_err=float(perr[1]),
         duration_days=float(best[2]), ingress_days=float(best[3]),
         baseline_slope=float(best[5]), baseline_curve=float(best[6]),
+        k_extinction=float(best[7]) if use_air else 0.0,
         rms_ppm=float(np.std(best_resid) * 1e6), n_points=len(x),
     )
 
