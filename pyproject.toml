@@ -17,6 +17,9 @@ dependencies = [
 # Only needed to process UNSOLVED frames. Requires a C compiler on Windows
 # (sep builds from source). Plate solving with ASTAP is the better path.
 align = ["astroalign>=2.5"]
+# batman is the reference Mandel-Agol implementation and what AstroImageJ
+# uses. Optional: a numpy integrator covers the same physics without it.
+ld = ["batman-package>=2.4"]
 
 [project.scripts]
 transitphot = "transitphot.cli:main"

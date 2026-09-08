@@ -302,6 +302,39 @@ def cmd_run(args):
         print(f"  depth        {res.depth_ppm:.0f} ± {res.depth_err*1e6:.0f} ppm")
         print(f"  duration     {res.duration_days*24:.2f} h")
         print(f"  residual RMS {res.rms_ppm:.0f} ppm")
+        ld_result = None
+        if args.model in ("ld", "both") and args.period:
+            from . import limbdark as _ld
+            try:
+                lf = _ld.fit(bjd, norm, err, period=args.period,
+                             expected_mid=(args.predicted_mid
+                                           or float(np.median(bjd))),
+                             expected_depth=(args.depth_ppm / 1e6
+                                             if args.depth_ppm else None),
+                             expected_duration_hours=args.duration_hours)
+                ld_result = lf
+                impl = "batman" if _ld.available() else "built-in integrator"
+                print(f"\n  limb-darkened fit ({impl}):")
+                print(f"    mid-transit  {lf.mid_bjd:.5f} BJD_TDB "
+                      f"(±{lf.mid_err_minutes:.1f} min)")
+                print(f"    depth        {lf.depth_ppm:.0f} ± "
+                      f"{lf.depth_err_ppm:.0f} ppm")
+                print(f"    Rp/Rs {lf.rp_rs:.4f}  a/Rs {lf.a_rs:.2f}  "
+                      f"i {lf.inclination_deg:.2f} deg")
+                print(f"    duration     {lf.duration_hours:.2f} h")
+                print(f"    residual RMS {lf.rms_ppm:.0f} ppm")
+                if args.predicted_mid:
+                    print(f"    O-C          "
+                          f"{(lf.mid_bjd - args.predicted_mid) * 1440:+.2f} min")
+                if args.model == "both":
+                    print("    (trapezoid values above; limb-darkened depth is "
+                          "the one to trust)")
+            except Exception as exc:                    # noqa: BLE001
+                print(f"  limb-darkened fit failed ({exc}); "
+                      f"trapezoid values stand")
+        elif args.model in ("ld", "both"):
+            print("  limb-darkened fit needs --period; skipped")
+
         if args.predicted_mid:
             pred = args.predicted_mid
             if args.pred_system == "jd_utc":
@@ -478,6 +511,11 @@ def main():
                    help="discard this many minutes from the start of the run")
     r.add_argument("--trim-end", type=float, default=0.0, dest="trim_end",
                    help="discard this many minutes from the end of the run")
+    r.add_argument("--model", choices=["trapezoid", "ld", "both"],
+                   default="trapezoid",
+                   help="transit model: 'trapezoid' (robust, depth reads ~10%% "
+                        "low), 'ld' (limb-darkened, correct depth), or 'both' "
+                        "to compare them on the same data")
     r.add_argument("--fix-duration", action="store_true", dest="fix_duration",
                    help="hold transit duration at --duration-hours; removes a "
                         "degeneracy that destabilizes fits on noisy data")

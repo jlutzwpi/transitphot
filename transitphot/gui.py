@@ -56,6 +56,7 @@ class App(tk.Tk):
 
         self.vars: dict[str, tk.StringVar] = {}
         self.fix_duration = tk.BooleanVar(value=True)
+        self.model = tk.StringVar(value="both")
         self.min_transparency = tk.StringVar(value="0.6")
         self.trim_start = tk.StringVar(value="0")
         self.trim_end = tk.StringVar(value="0")
@@ -206,14 +207,35 @@ class App(tk.Tk):
         # --- Options tab ---
         f3 = ttk.Frame(nb)
         nb.add(f3, text="Options")
+        ttk.Label(f3, text="Transit model",
+                  font=("TkDefaultFont", 9, "bold")).grid(
+            row=0, column=0, sticky="w", **pad)
+        mrow = ttk.Frame(f3)
+        mrow.grid(row=0, column=1, columnspan=3, sticky="w", **pad)
+        for val, label in (("trapezoid", "Trapezoid"),
+                           ("ld", "Limb-darkened"),
+                           ("both", "Both (compare)")):
+            ttk.Radiobutton(mrow, text=label, value=val,
+                            variable=self.model).pack(side="left", padx=(0, 14))
+        ttk.Label(f3, foreground="#555", justify="left",
+                  text="The trapezoid is robust but reads depths about 10-15% "
+                       "low — its flat bottom sits above\nthe true centre of a "
+                       "limb-darkened profile. The limb-darkened model gets "
+                       "depth right;\n\"Both\" fits the same data twice so you "
+                       "can compare. Needs a period to be set."
+                  ).grid(row=1, column=0, columnspan=4, sticky="w", **pad)
+
+        ttk.Separator(f3, orient="horizontal").grid(
+            row=2, column=0, columnspan=4, sticky="ew", padx=6, pady=(8, 6))
+
         ttk.Checkbutton(f3, text="Hold duration at the archive value "
                                  "(recommended)",
                         variable=self.fix_duration).grid(
-            row=0, column=0, columnspan=2, sticky="w", **pad)
+            row=3, column=0, columnspan=2, sticky="w", **pad)
         for r, (label, var) in enumerate([
                 ("Minimum transparency (0-1)", self.min_transparency),
                 ("Trim from start (minutes)", self.trim_start),
-                ("Trim from end (minutes)", self.trim_end)], start=1):
+                ("Trim from end (minutes)", self.trim_end)], start=4):
             ttk.Label(f3, text=label).grid(row=r, column=0, sticky="w", **pad)
             ttk.Entry(f3, textvariable=var, width=10).grid(
                 row=r, column=1, sticky="w", **pad)
@@ -222,7 +244,7 @@ class App(tk.Tk):
                        "data: the fit absorbs baseline curvature by\n"
                        "stretching the transit. Only release it with a long, "
                        "flat baseline on both sides."
-                  ).grid(row=4, column=0, columnspan=3, sticky="w", **pad)
+                  ).grid(row=7, column=0, columnspan=3, sticky="w", **pad)
 
         # --- action buttons ---
         bar = ttk.Frame(self)
@@ -416,6 +438,7 @@ class App(tk.Tk):
                           ("epoch_bjd", "--epoch-bjd"), ("period", "--period")):
             if v.get(key):
                 cmd += [flag, v[key]]
+        cmd += ["--model", self.model.get()]
         if self.fix_duration.get():
             cmd.append("--fix-duration")
         if self.min_transparency.get().strip():
@@ -616,7 +639,8 @@ class App(tk.Tk):
     def _save(self):
         data = {k: v.get() for k, v in self.vars.items()}
         data.update({f"sync_{k}": v.get() for k, v in self.sync_vars.items()})
-        data.update(fix_duration=self.fix_duration.get(),
+        data.update(model=self.model.get(),
+                    fix_duration=self.fix_duration.get(),
                     min_transparency=self.min_transparency.get(),
                     trim_start=self.trim_start.get(),
                     trim_end=self.trim_end.get())
@@ -638,6 +662,7 @@ class App(tk.Tk):
         for k, v in self.sync_vars.items():
             if f"sync_{k}" in data:
                 v.set(data[f"sync_{k}"])
+        self.model.set(data.get("model", "both"))
         self.fix_duration.set(data.get("fix_duration", True))
         self.min_transparency.set(data.get("min_transparency", "0.6"))
         self.trim_start.set(data.get("trim_start", "0"))

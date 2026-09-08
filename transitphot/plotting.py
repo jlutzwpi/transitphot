@@ -12,7 +12,8 @@ def plot_lightcurve(bjd, flux, flux_err=None, fit_result=None,
                     bin_minutes: float = 5.0,
                     predicted_mid: float | None = None,
                     duration_days: float | None = None,
-                    meridian_bjd: float | None = None):
+                    meridian_bjd: float | None = None,
+                    ld_fit=None, period: float | None = None):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -24,11 +25,13 @@ def plot_lightcurve(bjd, flux, flux_err=None, fit_result=None,
     x = (bjd - t0) * 24.0                       # hours since start of day
 
     has_fit = fit_result is not None
+    show_resid = has_fit or ld_fit is not None
     fig, axes = plt.subplots(
-        2 if has_fit else 1, 1, figsize=(9, 6.5 if has_fit else 4.5),
-        sharex=True, gridspec_kw={"height_ratios": [3, 1]} if has_fit else None,
+        2 if show_resid else 1, 1, figsize=(9, 6.5 if show_resid else 4.5),
+        sharex=True,
+        gridspec_kw={"height_ratios": [3, 1]} if show_resid else None,
     )
-    ax = axes[0] if has_fit else axes
+    ax = axes[0] if show_resid else axes
 
     ax.plot(x, flux, ".", ms=3, color="#9aa4b8", alpha=0.6, label="frames")
 
@@ -60,8 +63,8 @@ def plot_lightcurve(bjd, flux, flux_err=None, fit_result=None,
         vline(ax, predicted_mid + duration_days / 2, "#2a6f97", "predicted egress")
     vline(ax, meridian_bjd, "#b07d2b", "meridian flip", style=":")
 
+    fine = np.linspace(bjd.min(), bjd.max(), 800)
     if has_fit:
-        fine = np.linspace(bjd.min(), bjd.max(), 800)
         model = trapezoid(fine, fit_result.mid_bjd, fit_result.depth,
                           fit_result.duration_days, fit_result.ingress_days,
                           1.0, fit_result.baseline_slope,
@@ -70,6 +73,17 @@ def plot_lightcurve(bjd, flux, flux_err=None, fit_result=None,
                 label="trapezoid fit")
         ax.axvline((fit_result.mid_bjd - t0) * 24.0, ls="--", lw=1,
                    color="#c1121f", alpha=0.5)
+
+    # Overlay the limb-darkened model when one was fitted. Drawing both is
+    # the point of running them together: the shapes differ most through
+    # ingress and egress, which is exactly where the mid-time comes from.
+    if ld_fit is not None and period:
+        from .limbdark import model_curve
+        ld_model = model_curve(fine, ld_fit, period)
+        ax.plot((fine - t0) * 24.0, ld_model, "-", lw=1.8, color="#2a6f97",
+                label="limb-darkened fit")
+        ax.axvline((ld_fit.mid_bjd - t0) * 24.0, ls="--", lw=1,
+                   color="#2a6f97", alpha=0.5)
 
     ax.set_ylabel("normalized flux")
     ax.legend(frameon=False, fontsize=9)
@@ -82,12 +96,19 @@ def plot_lightcurve(bjd, flux, flux_err=None, fit_result=None,
                                  fit_result.ingress_days, 1.0,
                                  fit_result.baseline_slope,
                                  fit_result.baseline_curve)
-        axes[1].plot(x, resid * 1e6, ".", ms=3, color="#9aa4b8", alpha=0.6)
-        axes[1].axhline(0, color="#c1121f", lw=1)
+        axes[1].plot(x, resid * 1e6, ".", ms=3, color="#c1121f", alpha=0.55,
+                     label="trapezoid")
+        if ld_fit is not None and period:
+            from .limbdark import model_curve as _mc
+            ld_resid = flux - _mc(bjd, ld_fit, period)
+            axes[1].plot(x, ld_resid * 1e6, ".", ms=3, color="#2a6f97",
+                         alpha=0.55, label="limb-darkened")
+            axes[1].legend(frameon=False, fontsize=8, ncol=2, loc="upper right")
+        axes[1].axhline(0, color="#333", lw=0.8)
         axes[1].set_ylabel("resid (ppm)")
         axes[1].grid(alpha=0.15)
 
-    (axes[1] if has_fit else ax).set_xlabel(f"hours (BJD_TDB - {t0:.0f})")
+    (axes[1] if show_resid else ax).set_xlabel(f"hours (BJD_TDB - {t0:.0f})")
     fig.tight_layout()
     fig.savefig(out, dpi=140)
     return out
