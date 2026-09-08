@@ -356,6 +356,24 @@ def cmd_run(args):
             print(f"WARNING: could not write outputs or plot ({exc}).")
             print("The fitted values printed above are still valid.")
 
+def cmd_sync(args):
+    from .sync import copy_new, wait_until_clock, wait_until_idle
+    src, dst = Path(args.source), Path(args.dest)
+    if not src.exists():
+        raise SystemExit(f"Source not reachable: {src}")
+
+    if args.start:
+        wait_until_clock(args.start)
+    if args.after_idle:
+        wait_until_idle(src, args.after_idle, poll_s=args.poll)
+
+    copied, skipped = copy_new(src, dst, throttle_s=args.throttle,
+                               settle_s=args.settle, dry_run=args.dry_run)
+    print(f"Done: {copied} copied, {skipped} skipped -> {dst}")
+    if copied and not args.dry_run:
+        print("Next: transitphot calibrate --lights <dir> ...")
+
+
 def cmd_check(args):
     from .solve import inspect_dir
     reports = inspect_dir(Path(args.lights))
@@ -467,6 +485,24 @@ def main():
                    help="fix the aperture at this multiple of FWHM instead "
                         "of scanning for the best")
     r.set_defaults(func=cmd_run)
+
+    y = sub.add_parser("sync", help="copy frames from the capture device, "
+                                    "deferred until the session is over")
+    y.add_argument("--source", required=True,
+                   help=r"capture device folder, e.g. \\ASIAIR\sdcard\Autorun")
+    y.add_argument("--dest", required=True, help="local destination folder")
+    y.add_argument("--start", help="wait until this local time first (HH:MM)")
+    y.add_argument("--after-idle", type=float, dest="after_idle",
+                   help="wait until no file has changed for this many minutes; "
+                        "detects the end of a plan without needing to know it")
+    y.add_argument("--poll", type=float, default=30.0,
+                   help="seconds between idle checks (default 30)")
+    y.add_argument("--throttle", type=float, default=0.5,
+                   help="seconds between file copies (default 0.5)")
+    y.add_argument("--settle", type=float, default=5.0,
+                   help="seconds a file must be size-stable before copying")
+    y.add_argument("--dry-run", action="store_true", dest="dry_run")
+    y.set_defaults(func=cmd_sync)
 
     k = sub.add_parser("check", help="report which frames have a usable WCS")
     k.add_argument("--lights", required=True)
