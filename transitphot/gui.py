@@ -79,6 +79,55 @@ class App(tk.Tk):
         nb = ttk.Notebook(self)
         nb.pack(fill="x", padx=10, pady=(10, 4))
 
+        # --- Sync tab ---
+        f_sync = ttk.Frame(nb)
+        nb.add(f_sync, text="Sync from capture device")
+        for r, (key, label, default) in enumerate([
+                ("source", "Capture folder (source)", ""),
+                ("dest", "Local folder (destination)", "")]):
+            ttk.Label(f_sync, text=label).grid(row=r, column=0, sticky="w", **pad)
+            var = tk.StringVar(value=default)
+            self.sync_vars[key] = var
+            ttk.Entry(f_sync, textvariable=var, width=58).grid(
+                row=r, column=1, columnspan=2, **pad)
+            ttk.Button(f_sync, text="Browse…",
+                       command=lambda k=key: self._pick_sync_dir(k)
+                       ).grid(row=r, column=3, **pad)
+
+        ttk.Label(f_sync, text="Start at (HH:MM, optional)").grid(
+            row=2, column=0, sticky="w", **pad)
+        self.sync_vars["start"] = tk.StringVar()
+        ttk.Entry(f_sync, textvariable=self.sync_vars["start"], width=10).grid(
+            row=2, column=1, sticky="w", **pad)
+
+        ttk.Label(f_sync, text="Or start after idle (minutes)").grid(
+            row=3, column=0, sticky="w", **pad)
+        self.sync_vars["after_idle"] = tk.StringVar(value="15")
+        ttk.Entry(f_sync, textvariable=self.sync_vars["after_idle"], width=10).grid(
+            row=3, column=1, sticky="w", **pad)
+
+        sbar = ttk.Frame(f_sync)
+        sbar.grid(row=4, column=0, columnspan=4, sticky="w", pady=(10, 2))
+        self.btn_sync = ttk.Button(sbar, text="Start sync", command=self._sync)
+        self.btn_sync.pack(side="left", padx=6)
+        ttk.Button(sbar, text="Dry run",
+                   command=lambda: self._sync(dry=True)).pack(side="left", padx=6)
+        self.btn_sync_stop = ttk.Button(sbar, text="Stop sync",
+                                        command=self._stop_sync, state="disabled")
+        self.btn_sync_stop.pack(side="left", padx=6)
+        self.sync_status = ttk.Label(sbar, text="", foreground="#666")
+        self.sync_status.pack(side="left", padx=12)
+
+        ttk.Label(f_sync, foreground="#555", justify="left",
+                  text="Copies after the session rather than during it: reading "
+                       "large frames off the capture device\nwhile it is still "
+                       "imaging competes with the camera and USB bus. Idle "
+                       "detection starts the\ncopy once nothing has changed for "
+                       "the given number of minutes.\n\n"
+                       "The sync only runs while this window is open — use the "
+                       "command line if you want to close it."
+                  ).grid(row=5, column=0, columnspan=4, sticky="w", **pad)
+
         # --- Folders tab ---
         f1 = ttk.Frame(nb)
         nb.add(f1, text="Folders")
@@ -153,55 +202,6 @@ class App(tk.Tk):
         ttk.Label(f2, foreground="#555", justify="left",
                   text="Site values persist between sessions - enter them once."
                   ).grid(row=8, column=2, columnspan=2, sticky="w", **pad)
-
-        # --- Sync tab ---
-        f4 = ttk.Frame(nb)
-        nb.add(f4, text="Sync from capture device")
-        for r, (key, label, default) in enumerate([
-                ("source", "Capture folder (source)", ""),
-                ("dest", "Local folder (destination)", "")]):
-            ttk.Label(f4, text=label).grid(row=r, column=0, sticky="w", **pad)
-            var = tk.StringVar(value=default)
-            self.sync_vars[key] = var
-            ttk.Entry(f4, textvariable=var, width=58).grid(
-                row=r, column=1, columnspan=2, **pad)
-            ttk.Button(f4, text="Browse…",
-                       command=lambda k=key: self._pick_sync_dir(k)
-                       ).grid(row=r, column=3, **pad)
-
-        ttk.Label(f4, text="Start at (HH:MM, optional)").grid(
-            row=2, column=0, sticky="w", **pad)
-        self.sync_vars["start"] = tk.StringVar()
-        ttk.Entry(f4, textvariable=self.sync_vars["start"], width=10).grid(
-            row=2, column=1, sticky="w", **pad)
-
-        ttk.Label(f4, text="Or start after idle (minutes)").grid(
-            row=3, column=0, sticky="w", **pad)
-        self.sync_vars["after_idle"] = tk.StringVar(value="15")
-        ttk.Entry(f4, textvariable=self.sync_vars["after_idle"], width=10).grid(
-            row=3, column=1, sticky="w", **pad)
-
-        sbar = ttk.Frame(f4)
-        sbar.grid(row=4, column=0, columnspan=4, sticky="w", pady=(10, 2))
-        self.btn_sync = ttk.Button(sbar, text="Start sync", command=self._sync)
-        self.btn_sync.pack(side="left", padx=6)
-        ttk.Button(sbar, text="Dry run",
-                   command=lambda: self._sync(dry=True)).pack(side="left", padx=6)
-        self.btn_sync_stop = ttk.Button(sbar, text="Stop sync",
-                                        command=self._stop_sync, state="disabled")
-        self.btn_sync_stop.pack(side="left", padx=6)
-        self.sync_status = ttk.Label(sbar, text="", foreground="#666")
-        self.sync_status.pack(side="left", padx=12)
-
-        ttk.Label(f4, foreground="#555", justify="left",
-                  text="Copies after the session rather than during it: reading "
-                       "large frames off the capture device\nwhile it is still "
-                       "imaging competes with the camera and USB bus. Idle "
-                       "detection starts the\ncopy once nothing has changed for "
-                       "the given number of minutes.\n\n"
-                       "The sync only runs while this window is open — use the "
-                       "command line if you want to close it."
-                  ).grid(row=5, column=0, columnspan=4, sticky="w", **pad)
 
         # --- Options tab ---
         f3 = ttk.Frame(nb)
