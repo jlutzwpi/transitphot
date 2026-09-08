@@ -39,8 +39,9 @@ class LimbDarkFit:
     rp_rs_err: float
     a_rs: float                  # semi-major axis in stellar radii
     inclination_deg: float
-    depth_ppm: float             # (Rp/Rs)^2, the standard depth definition
+    depth_ppm: float             # (Rp/Rs)^2 — the catalogue convention
     depth_err_ppm: float
+    central_depth_ppm: float     # the observed dip at mid-transit
     duration_hours: float
     rms_ppm: float
     n_points: int
@@ -167,11 +168,18 @@ def fit(bjd, flux, flux_err=None, *, period: float,
     mid, rp, a, inc = popt[0], popt[1], popt[2], popt[3]
     depth = rp ** 2
     depth_err = 2 * rp * perr[1]
+    # Two different numbers get called "depth". (Rp/Rs)^2 is the geometric
+    # ratio catalogues list; the observed dip at mid-transit is deeper,
+    # because the planet covers the bright centre of a limb-darkened disc.
+    # AstroImageJ quotes the latter, so report both to avoid comparing
+    # incompatible quantities.
+    central = 1.0 - float(_occulted_flux([0.0], rp, u1, u2)[0])
     return LimbDarkFit(
         mid_bjd=float(mid), mid_err_days=float(perr[0]),
         rp_rs=float(rp), rp_rs_err=float(perr[1]),
         a_rs=float(a), inclination_deg=float(inc),
         depth_ppm=float(depth * 1e6), depth_err_ppm=float(depth_err * 1e6),
+        central_depth_ppm=float(central * 1e6),
         duration_hours=transit_duration_hours(period, rp, a, inc),
         rms_ppm=float(np.std(resid) * 1e6), n_points=len(bjd),
         u1=u1, u2=u2,

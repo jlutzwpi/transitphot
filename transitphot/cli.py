@@ -318,7 +318,10 @@ def cmd_run(args):
                 print(f"    mid-transit  {lf.mid_bjd:.5f} BJD_TDB "
                       f"(±{lf.mid_err_minutes:.1f} min)")
                 print(f"    depth        {lf.depth_ppm:.0f} ± "
-                      f"{lf.depth_err_ppm:.0f} ppm")
+                      f"{lf.depth_err_ppm:.0f} ppm  [(Rp/Rs)^2, catalog "
+                      f"convention]")
+                print(f"    central dip  {lf.central_depth_ppm:.0f} ppm  "
+                      f"[observed at mid-transit; compare with AstroImageJ]")
                 print(f"    Rp/Rs {lf.rp_rs:.4f}  a/Rs {lf.a_rs:.2f}  "
                       f"i {lf.inclination_deg:.2f} deg")
                 print(f"    duration     {lf.duration_hours:.2f} h")
@@ -327,8 +330,28 @@ def cmd_run(args):
                     print(f"    O-C          "
                           f"{(lf.mid_bjd - args.predicted_mid) * 1440:+.2f} min")
                 if args.model == "both":
-                    print("    (trapezoid values above; limb-darkened depth is "
-                          "the one to trust)")
+                    # Which model to believe is a property of the data, not a
+                    # rule. Say what the fits actually show and let the
+                    # observer judge.
+                    notes = []
+                    if lf.mid_err_minutes > 3 * max(res.mid_err_minutes, 0.1):
+                        notes.append("the limb-darkened mid-time is much less "
+                                     "certain — its geometry is probably "
+                                     "under-constrained by this series")
+                    if args.depth_ppm:
+                        exp_rp = (args.depth_ppm / 1e6) ** 0.5
+                        if abs(lf.rp_rs - exp_rp) > 0.25 * exp_rp:
+                            notes.append(f"fitted Rp/Rs {lf.rp_rs:.3f} is far "
+                                         f"from the catalog {exp_rp:.3f} — "
+                                         f"treat the limb-darkened result with "
+                                         f"caution")
+                    better = ("limb-darkened" if lf.rms_ppm < res.rms_ppm
+                              else "trapezoid")
+                    notes.append(f"lower residual RMS: {better} "
+                                 f"({min(lf.rms_ppm, res.rms_ppm):.0f} vs "
+                                 f"{max(lf.rms_ppm, res.rms_ppm):.0f} ppm)")
+                    for n in notes:
+                        print(f"    note: {n}")
             except Exception as exc:                    # noqa: BLE001
                 print(f"  limb-darkened fit failed ({exc}); "
                       f"trapezoid values stand")
