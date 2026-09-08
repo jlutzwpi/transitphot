@@ -377,13 +377,15 @@ def cmd_run(args):
                             np.array([mer_jd]), args.ra, args.dec,
                             args.lat, args.lon, args.elevation)[0])
                         print(f"  meridian crossing at {mer:.5f} BJD_TDB")
-                plot_lightcurve(bjd, norm, err, res,
+                plot_lightcurve(bjd, norm, err,
+                                res if args.model != "ld" else None,
                                 title=f"RA {args.ra} Dec {args.dec}",
                                 out=Path(args.plot),
                                 predicted_mid=(pred if args.predicted_mid else None),
                                 duration_days=(args.duration_hours / 24.0
                                                if args.duration_hours else None),
-                                meridian_bjd=mer)
+                                meridian_bjd=mer,
+                                ld_fit=ld_result, period=args.period_days)
                 print(f"  wrote {args.plot}")
         except Exception as exc:                        # noqa: BLE001
             print(f"WARNING: could not write outputs or plot ({exc}).")
