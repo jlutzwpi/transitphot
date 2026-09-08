@@ -303,10 +303,10 @@ def cmd_run(args):
         print(f"  duration     {res.duration_days*24:.2f} h")
         print(f"  residual RMS {res.rms_ppm:.0f} ppm")
         ld_result = None
-        if args.model in ("ld", "both") and args.period:
+        if args.model in ("ld", "both") and args.period_days:
             from . import limbdark as _ld
             try:
-                lf = _ld.fit(bjd, norm, err, period=args.period,
+                lf = _ld.fit(bjd, norm, err, period=args.period_days,
                              expected_mid=(args.predicted_mid
                                            or float(np.median(bjd))),
                              expected_depth=(args.depth_ppm / 1e6
