@@ -63,6 +63,11 @@ class App(tk.Tk):
         self.q: queue.Queue[str] = queue.Queue()
         self.pending_plot: Path | None = None   # shown when the job succeeds
         self.plot_win: tk.Toplevel | None = None
+        # Sync runs in its own slot: it can wait for hours, and locking out
+        # calibrate/run for that whole time would make the GUI useless
+        # overnight.
+        self.sync_proc: subprocess.Popen | None = None
+        self.sync_vars: dict[str, tk.StringVar] = {}
 
         self._build()
         self._load()
@@ -148,6 +153,55 @@ class App(tk.Tk):
         ttk.Label(f2, foreground="#555", justify="left",
                   text="Site values persist between sessions - enter them once."
                   ).grid(row=8, column=2, columnspan=2, sticky="w", **pad)
+
+        # --- Sync tab ---
+        f4 = ttk.Frame(nb)
+        nb.add(f4, text="Sync from capture device")
+        for r, (key, label, default) in enumerate([
+                ("source", "Capture folder (source)", ""),
+                ("dest", "Local folder (destination)", "")]):
+            ttk.Label(f4, text=label).grid(row=r, column=0, sticky="w", **pad)
+            var = tk.StringVar(value=default)
+            self.sync_vars[key] = var
+            ttk.Entry(f4, textvariable=var, width=58).grid(
+                row=r, column=1, columnspan=2, **pad)
+            ttk.Button(f4, text="Browse…",
+                       command=lambda k=key: self._pick_sync_dir(k)
+                       ).grid(row=r, column=3, **pad)
+
+        ttk.Label(f4, text="Start at (HH:MM, optional)").grid(
+            row=2, column=0, sticky="w", **pad)
+        self.sync_vars["start"] = tk.StringVar()
+        ttk.Entry(f4, textvariable=self.sync_vars["start"], width=10).grid(
+            row=2, column=1, sticky="w", **pad)
+
+        ttk.Label(f4, text="Or start after idle (minutes)").grid(
+            row=3, column=0, sticky="w", **pad)
+        self.sync_vars["after_idle"] = tk.StringVar(value="15")
+        ttk.Entry(f4, textvariable=self.sync_vars["after_idle"], width=10).grid(
+            row=3, column=1, sticky="w", **pad)
+
+        sbar = ttk.Frame(f4)
+        sbar.grid(row=4, column=0, columnspan=4, sticky="w", pady=(10, 2))
+        self.btn_sync = ttk.Button(sbar, text="Start sync", command=self._sync)
+        self.btn_sync.pack(side="left", padx=6)
+        ttk.Button(sbar, text="Dry run",
+                   command=lambda: self._sync(dry=True)).pack(side="left", padx=6)
+        self.btn_sync_stop = ttk.Button(sbar, text="Stop sync",
+                                        command=self._stop_sync, state="disabled")
+        self.btn_sync_stop.pack(side="left", padx=6)
+        self.sync_status = ttk.Label(sbar, text="", foreground="#666")
+        self.sync_status.pack(side="left", padx=12)
+
+        ttk.Label(f4, foreground="#555", justify="left",
+                  text="Copies after the session rather than during it: reading "
+                       "large frames off the capture device\nwhile it is still "
+                       "imaging competes with the camera and USB bus. Idle "
+                       "detection starts the\ncopy once nothing has changed for "
+                       "the given number of minutes.\n\n"
+                       "The sync only runs while this window is open — use the "
+                       "command line if you want to close it."
+                  ).grid(row=5, column=0, columnspan=4, sticky="w", **pad)
 
         # --- Options tab ---
         f3 = ttk.Frame(nb)
@@ -419,7 +473,12 @@ class App(tk.Tk):
         try:
             while True:
                 item = self.q.get_nowait()
-                if item.startswith("__CODE__"):
+                if item == "__SYNCDONE__":
+                    self.btn_sync.config(state="normal")
+                    self.btn_sync_stop.config(state="disabled")
+                    if self.sync_status.cget("text") != "Stopped":
+                        self.sync_status.config(text="Done", foreground="#2e7d4f")
+                elif item.startswith("__CODE__"):
                     self.last_code = int(item[len("__CODE__"):])
                 elif item == "__DONE__":
                     self.status.config(text="Ready")
@@ -439,6 +498,68 @@ class App(tk.Tk):
         except queue.Empty:
             pass
         self.after(100, self._drain)
+
+    # ---------------- sync ----------------
+    def _pick_sync_dir(self, key):
+        d = filedialog.askdirectory(title=f"Select {key} folder")
+        if d:
+            self.sync_vars[key].set(d)
+
+    def _sync(self, dry: bool = False):
+        if self.sync_proc and self.sync_proc.poll() is None:
+            messagebox.showinfo("transitphot", "A sync is already running.")
+            return
+        src = self.sync_vars["source"].get().strip()
+        dst = self.sync_vars["dest"].get().strip()
+        if not src or not dst:
+            messagebox.showwarning(
+                "transitphot", "Choose both a source and a destination folder.")
+            return
+
+        cmd = self._base_cmd("sync") + ["--source", src, "--dest", dst]
+        start = self.sync_vars["start"].get().strip()
+        idle = self.sync_vars["after_idle"].get().strip()
+        if start:
+            cmd += ["--start", start]
+        if idle and float(idle) > 0:
+            cmd += ["--after-idle", idle]
+        if dry:
+            cmd.append("--dry-run")
+
+        self._say("\n$ " + " ".join(cmd) + "\n")
+        self.sync_status.config(text="Dry run…" if dry else "Waiting…",
+                                foreground="#b07d2b")
+        self.btn_sync.config(state="disabled")
+        self.btn_sync_stop.config(state="normal")
+        self._save()
+        threading.Thread(target=self._sync_worker, args=(cmd,),
+                         daemon=True).start()
+
+    def _sync_worker(self, cmd):
+        try:
+            env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1")
+            self.sync_proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, bufsize=1, encoding="utf-8", errors="replace",
+                env=env,
+                creationflags=(subprocess.CREATE_NO_WINDOW
+                               if sys.platform.startswith("win") else 0),
+            )
+            for line in self.sync_proc.stdout:
+                self.q.put("[sync] " + line)
+            code = self.sync_proc.wait()
+            self.q.put(f"[sync] finished, exit code {code}\n")
+        except Exception as exc:                        # noqa: BLE001
+            self.q.put(f"[sync] error: {exc}\n")
+        finally:
+            self.q.put("__SYNCDONE__")
+
+    def _stop_sync(self):
+        if self.sync_proc and self.sync_proc.poll() is None:
+            self.sync_proc.terminate()
+            self._say("[sync] stopped by user — files already copied are "
+                      "complete and will be skipped on a later run\n")
+        self.sync_status.config(text="Stopped", foreground="#666")
 
     # ---------------- plot viewer ----------------
     def _show_plot(self, path: Path):
@@ -494,6 +615,7 @@ class App(tk.Tk):
     # ---------------- settings ----------------
     def _save(self):
         data = {k: v.get() for k, v in self.vars.items()}
+        data.update({f"sync_{k}": v.get() for k, v in self.sync_vars.items()})
         data.update(fix_duration=self.fix_duration.get(),
                     min_transparency=self.min_transparency.get(),
                     trim_start=self.trim_start.get(),
@@ -513,12 +635,18 @@ class App(tk.Tk):
         for k, v in self.vars.items():
             if k in data:
                 v.set(data[k])
+        for k, v in self.sync_vars.items():
+            if f"sync_{k}" in data:
+                v.set(data[f"sync_{k}"])
         self.fix_duration.set(data.get("fix_duration", True))
         self.min_transparency.set(data.get("min_transparency", "0.6"))
         self.trim_start.set(data.get("trim_start", "0"))
         self.trim_end.set(data.get("trim_end", "0"))
 
     def destroy(self):
+        for p in (self.proc, self.sync_proc):
+            if p and p.poll() is None:
+                p.terminate()
         self._save()
         super().destroy()
 
