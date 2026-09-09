@@ -317,8 +317,13 @@ def cmd_run(args):
         print(f"  duration     {res.duration_days*24:.2f} h")
         print(f"  residual RMS {res.rms_ppm:.0f} ppm")
         if air is not None:
-            print(f"  extinction   k = {res.k_extinction:+.4f} mag/airmass "
-                  f"(residual colour mismatch with the comparisons)")
+            if res.baseline_model == "airmass":
+                print(f"  baseline     airmass model, k = "
+                      f"{res.k_extinction:+.4f} mag/airmass "
+                      f"(residual colour mismatch with the comparisons)")
+            else:
+                print("  baseline     polynomial (the airmass model did not "
+                      "improve the fit on this night)")
         ld_result = None
         if args.model in ("ld", "both") and args.period_days:
             from . import limbdark as _ld
