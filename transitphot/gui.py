@@ -50,7 +50,7 @@ FIELDS = [
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("transitphot")
+        self.title("TransitPlanner Processor")
         self.geometry("980x760")
         self.minsize(860, 620)
 
@@ -131,7 +131,7 @@ class App(tk.Tk):
 
         # --- Folders tab ---
         f1 = ttk.Frame(nb)
-        nb.add(f1, text="Folders")
+        nb.add(f1, text="Calibration Folders")
         for r, (key, label, _kind) in enumerate(FIELDS[:4]):
             ttk.Label(f1, text=label).grid(row=r, column=0, sticky="w", **pad)
             v = tk.StringVar()
@@ -151,7 +151,7 @@ class App(tk.Tk):
         # own column because they are properties of the observer, not the
         # target, and change on a completely different timescale.
         f2 = ttk.Frame(nb)
-        nb.add(f2, text="Target && site")
+        nb.add(f2, text="Target and Site")
 
         ttk.Label(f2, text="Target name",
                   font=("TkDefaultFont", 9, "bold")).grid(
@@ -187,7 +187,7 @@ class App(tk.Tk):
             ttk.Entry(f2, textvariable=var, width=22).grid(
                 row=r, column=1, sticky="w", **pad)
 
-        ttk.Label(f2, text="Site && instrument",
+        ttk.Label(f2, text="Site and Instrument",
                   font=("TkDefaultFont", 9, "bold")).grid(
             row=3, column=2, sticky="w", **pad)
         site_fields = [("lat", "Latitude (deg)"),

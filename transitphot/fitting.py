@@ -35,7 +35,6 @@ class TransitFit:
     baseline_slope: float
     baseline_curve: float
     k_extinction: float
-    baseline_model: str
     rms_ppm: float
     n_points: int
 
@@ -130,17 +129,14 @@ def fit(bjd: np.ndarray, flux: np.ndarray, flux_err: np.ndarray | None = None,
     # so fitting both lets them trade against each other and neither means
     # anything. Use the airmass term when we have it, since it is the actual
     # physics, and pin the quadratic to zero.
-    # Airmass and the quadratic time term describe similar shapes over a
-    # short session, so fitting both is degenerate. But which one is right is
-    # a property of the night, not a rule: if the baseline trend really is
-    # extinction, the airmass term explains it with one parameter; if it is
-    # something else (focus drift, flat-field structure as the field moves),
-    # only the polynomial can follow it. Fit both and keep whichever the data
-    # prefers — decided below by BIC, which penalises the extra parameter.
-    air_full = (np.asarray(airmass, dtype=float)[good]
-                if airmass is not None else None)
-    air = None
-    use_air = False
+    use_air = airmass is not None
+    if use_air:
+        air = np.asarray(airmass, dtype=float)[good]
+        lo[6], hi[6] = -1e-9, 1e-9          # curvature off
+        lo = lo + [-0.5]
+        hi = hi + [0.5]
+    else:
+        air = None
     if fix_duration and expected_duration_hours:
         # Duration is well known from the archive and trades against depth
         # and mid-time in a noisy fit. Pinning it removes a degeneracy that
@@ -150,57 +146,30 @@ def fit(bjd: np.ndarray, flux: np.ndarray, flux_err: np.ndarray | None = None,
     # Multi-start: the prior, plus a scan across the observed window.
     starts = [mid0] + list(np.linspace(x.min() + dur0 / 2,
                                        x.max() - dur0 / 2, 9))
-    def _search(use_airmass: bool):
-        nonlocal air, use_air
-        use_air = use_airmass
-        air = air_full if use_airmass else None
-        _lo, _hi = list(lo), list(hi)
-        if use_airmass:
-            _lo[6], _hi[6] = -1e-9, 1e-9      # curvature off, airmass instead
-            _lo, _hi = _lo + [-0.5], _hi + [0.5]
-        _best, _cov, _chi2 = None, None, np.inf
-        for m in starts:
-            mm = float(np.clip(m, _lo[0] + 1e-6, _hi[0] - 1e-6))
-            p0 = [mm, dep0, dur0, dur0 * 0.12, 1.0, 0.0, 0.0]
-            if use_airmass:
-                p0 = p0 + [0.0]
-            p0 = [float(np.clip(v, a, b)) for v, a, b in zip(p0, _lo, _hi)]
-            fn = ((lambda tt, *pp: trapezoid(tt, *pp, airmass=air))
-                  if use_airmass else trapezoid)
-            try:
-                popt, pcov = curve_fit(fn, x, flux, p0=p0, bounds=(_lo, _hi),
-                                       sigma=sigma,
-                                       absolute_sigma=sigma is not None,
-                                       loss="soft_l1", f_scale=0.01,
-                                       maxfev=20000)
-            except Exception:                           # noqa: BLE001
-                continue
-            resid = flux - fn(x, *popt)
-            c2 = float(np.sum((resid / (sigma if sigma is not None else 1.0)) ** 2))
-            if c2 < _chi2:
-                _best, _cov, _chi2 = popt, pcov, c2
-        return _best, _cov, _chi2, _lo, _hi
+    best, best_chi2 = None, np.inf
+    for m in starts:
+        m = float(np.clip(m, lo[0] + 1e-6, hi[0] - 1e-6))
+        p0 = [m, dep0, dur0, dur0 * 0.12, 1.0, 0.0, 0.0]
+        if use_air:
+            p0 = p0 + [0.0]
+        p0 = [float(np.clip(v, l, h)) for v, l, h in zip(p0, lo, hi)]
+        model_fn = ((lambda tt, *pp: trapezoid(tt, *pp, airmass=air))
+                    if use_air else trapezoid)
+        try:
+            # soft_l1 loss: quadratic near zero, linear in the tails, so a
+            # few surviving outliers bend the fit instead of dictating it.
+            popt, pcov = curve_fit(model_fn, x, flux, p0=p0, bounds=(lo, hi),
+                                   sigma=sigma, absolute_sigma=sigma is not None,
+                                   loss="soft_l1", f_scale=0.01, maxfev=20000)
+        except Exception:                               # noqa: BLE001
+            continue
+        resid = flux - model_fn(x, *popt)
+        chi2 = float(np.sum((resid / (sigma if sigma is not None else 1.0)) ** 2))
+        if chi2 < best_chi2:
+            best, best_chi2, best_cov, best_resid = popt, chi2, pcov, resid
 
-    n = len(x)
-    cand = []
-    b_poly = _search(False)
-    if b_poly[0] is not None:
-        rss = np.sum((flux - trapezoid(x, *b_poly[0])) ** 2)
-        bic = n * np.log(rss / n) + len(b_poly[0]) * np.log(n)
-        cand.append(("polynomial", b_poly, bic))
-    if air_full is not None:
-        b_air = _search(True)
-        if b_air[0] is not None:
-            air = air_full
-            rss = np.sum((flux - trapezoid(x, *b_air[0], airmass=air_full)) ** 2)
-            bic = n * np.log(rss / n) + len(b_air[0]) * np.log(n)
-            cand.append(("airmass", b_air, bic))
-    if not cand:
+    if best is None:
         raise RuntimeError("Transit fit did not converge — check the light curve.")
-    label, (best, best_cov, best_chi2, lo, hi), _ = min(cand, key=lambda c: c[2])
-    use_air = label == "airmass"
-    air = air_full if use_air else None
-    baseline_model = label
 
     # Uncertainties: the robust (soft_l1) loss finds parameter values that
     # outliers can't dictate, but its covariance is not a meaningful error
@@ -211,7 +180,6 @@ def fit(bjd: np.ndarray, flux: np.ndarray, flux_err: np.ndarray | None = None,
     model_fn = ((lambda tt, *pp: trapezoid(tt, *pp, airmass=air))
                 if use_air else trapezoid)
     resid_r = flux - model_fn(x, *best)
-    best_resid = resid_r
     s = 1.4826 * np.median(np.abs(resid_r - np.median(resid_r)))
     inl = np.abs(resid_r) < 4 * s if s > 0 else np.ones(len(x), bool)
     try:
@@ -235,7 +203,6 @@ def fit(bjd: np.ndarray, flux: np.ndarray, flux_err: np.ndarray | None = None,
         duration_days=float(best[2]), ingress_days=float(best[3]),
         baseline_slope=float(best[5]), baseline_curve=float(best[6]),
         k_extinction=float(best[7]) if use_air else 0.0,
-        baseline_model=baseline_model,
         rms_ppm=float(np.std(best_resid) * 1e6), n_points=len(x),
     )
 
