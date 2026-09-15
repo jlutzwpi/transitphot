@@ -413,11 +413,27 @@ class App(tk.Tk):
             if val is not None:
                 self.vars[key].set(fmt.format(val) if isinstance(val, float)
                                    else str(val))
+
+        def put_exact(key, val):
+            """
+            Write a value without losing precision.
+
+            A transit epoch is ~2.46e6 with six meaningful decimals, so any
+            significant-figure format truncates it: "{:.6g}" turns
+            2458392.597691 into 2458392.6, discarding 3.3 minutes and
+            manufacturing an apparent timing anomaly. Periods need similar
+            care — a period good to 1e-9 d is what keeps a prediction sharp
+            over thousands of orbits.
+            """
+            if val is None:
+                return
+            self.vars[key].set(f"{val!r}" if isinstance(val, float)
+                               else str(val))
         put("ra", r0.get("ra"))
         put("dec", r0.get("dec"))
         put("target_mag", r0.get("sy_gaiamag") or r0.get("sy_vmag"))
-        put("period", r0.get("pl_orbper"), "{:.9g}")
-        put("epoch_bjd", r0.get("pl_tranmid"), "{:.9g}")
+        put_exact("period", r0.get("pl_orbper"))
+        put_exact("epoch_bjd", r0.get("pl_tranmid"))
         put("duration_hours", r0.get("pl_trandur"))
         if r0.get("pl_trandep") is not None:
             self.vars["depth_ppm"].set(f"{r0['pl_trandep'] * 10000:.0f}")
