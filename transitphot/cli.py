@@ -62,7 +62,12 @@ def cmd_run(args):
     hdr0 = fits.getheader(paths[0])
     # Comparison stars: query the field, rank, then verify against the data
     print("Querying field for comparison stars…")
-    field = cs.query_field(args.ra, args.dec, radius_arcmin=args.radius)
+    radius = args.radius
+    if radius is None:
+        from astropy.io import fits as _fits
+        radius = ph.field_radius_arcmin(_fits.getheader(paths[0]))
+        print(f"Comparison search radius {radius:.1f}' (from the frame's WCS)")
+    field = cs.query_field(args.ra, args.dec, radius_arcmin=radius)
     comps = cs.select(args.ra, args.dec, args.target_mag, field,
                       n=args.n_comps, filter_band=args.filter_band)
     if not comps:
@@ -79,7 +84,8 @@ def cmd_run(args):
         except Exception:                            # noqa: BLE001
             return None
 
-    fwhm = args.fwhm if args.fwhm else ph.session_fwhm(paths, _target_xy)
+    fwhm = args.fwhm if args.fwhm else ph.session_fwhm(paths, _target_xy,
+                                                      report=True)
     if not args.fwhm and not (1.5 <= fwhm <= 12.0):
         print(f"WARNING: measured session FWHM {fwhm:.1f} px is outside the "
               f"usual 2-8 px range. Check the finder chart; override with "
@@ -92,7 +98,8 @@ def cmd_run(args):
     if args.aperture_scale:
         scales = [args.aperture_scale]
     else:
-        scales = [0.7, 0.9, 1.1, 1.3, 1.6, 2.0]
+        top = args.max_aperture_scale
+        scales = [round(0.7 * (top / 0.7) ** (i / 6), 2) for i in range(7)]
     RADII = [sc * fwhm for sc in scales]
     R_IN, R_OUT = 3.5 * fwhm, 6.0 * fwhm
     print(f"Session FWHM {fwhm:.2f} px | trying apertures "
@@ -139,6 +146,18 @@ def cmd_run(args):
         if n_done % 25 == 0:
             print(f"  measured {n_done}/{len(paths)} frames")
 
+    if not times:
+        raise SystemExit(
+            f"No frames could be measured — the target was not detectable at "
+            f"RA {args.ra}, Dec {args.dec} in any of the {len(paths)} frames.\n"
+            f"  {n_rejected} frame(s) rejected at the centroid check.\n"
+            f"The usual cause is coordinates that don't match the data: check "
+            f"that --ra/--dec belong to the target in this folder, not a "
+            f"previous run's target. Open the finder chart from an earlier "
+            f"successful run to compare, or plate-solve one frame and inspect "
+            f"where it points."
+        )
+
     tflux = np.array(tflux)                          # (n_frames, n_radii)
     cflux = np.array(cflux)                          # (n_frames, n_radii, n_comps)
 
@@ -152,10 +171,20 @@ def cmd_run(args):
         for i, r in enumerate(RADII):
             sc = cs.stability_report(cflux[:, i, :].T)
             med = float(np.nanmedian(sc))
-            mark = ""
             if med < best_med:
-                best_i, best_med, mark = i, med, ""
+                best_i, best_med = i, med
             print(f"  {r:5.1f} px  {med:8.0f} ppm")
+        # A minimum at the edge of the ladder is not a minimum — scatter may
+        # still be falling beyond it. Say so, because the chosen aperture is
+        # then a limit of the search rather than a property of the data.
+        if best_i == len(RADII) - 1:
+            print(f"  NOTE: the best aperture is the largest tried. Scatter "
+                  f"may still be improving — re-run with "
+                  f"--aperture-scale {RADII[-1] / fwhm * 1.3:.1f} or larger, "
+                  f"or --max-aperture-scale to widen the scan.")
+        elif best_i == 0:
+            print("  NOTE: the best aperture is the smallest tried; the "
+                  "optimum may be narrower still.")
         print(f"  -> using {RADII[best_i]:.1f} px")
     else:
         best_i = 0
@@ -317,8 +346,13 @@ def cmd_run(args):
         print(f"  duration     {res.duration_days*24:.2f} h")
         print(f"  residual RMS {res.rms_ppm:.0f} ppm")
         if air is not None:
-            print(f"  extinction   k = {res.k_extinction:+.4f} mag/airmass "
-                  f"(residual colour mismatch with the comparisons)")
+            if res.baseline_model == "airmass":
+                print(f"  baseline     airmass model, k = "
+                      f"{res.k_extinction:+.4f} mag/airmass "
+                      f"(residual colour mismatch with the comparisons)")
+            else:
+                print("  baseline     polynomial (the airmass model did not "
+                      "improve the fit on this night)")
         ld_result = None
         if args.model in ("ld", "both") and args.period_days:
             from . import limbdark as _ld
@@ -512,7 +546,9 @@ def main():
     r.add_argument("--ra", type=float, required=True, help="target RA in degrees")
     r.add_argument("--dec", type=float, required=True, help="target Dec in degrees")
     r.add_argument("--target-mag", type=float, required=True)
-    r.add_argument("--radius", type=float, default=20.0, help="field radius arcmin")
+    r.add_argument("--radius", type=float, default=None,
+                   help="comparison search radius in arcmin (default: the "
+                        "frame's half-diagonal, read from its WCS)")
     r.add_argument("--n-comps", type=int, default=5)
     r.add_argument("--filter", dest="filter_band",
                    help="filter used (R, L, V...) — relaxes the color match "
@@ -565,6 +601,11 @@ def main():
     r.add_argument("--fix-duration", action="store_true", dest="fix_duration",
                    help="hold transit duration at --duration-hours; removes a "
                         "degeneracy that destabilizes fits on noisy data")
+    r.add_argument("--max-aperture-scale", type=float, default=2.6,
+                   dest="max_aperture_scale",
+                   help="largest aperture to try, as a multiple of FWHM "
+                        "(default 2.6; raise it if the scan reports the best "
+                        "aperture is the largest tried)")
     r.add_argument("--aperture-scale", type=float, dest="aperture_scale",
                    help="fix the aperture at this multiple of FWHM instead "
                         "of scanning for the best")

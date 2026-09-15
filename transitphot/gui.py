@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import re
 import subprocess
 import sys
 import threading
@@ -67,6 +68,7 @@ class App(tk.Tk):
         # Sync runs in its own slot: it can wait for hours, and locking out
         # calibrate/run for that whole time would make the GUI useless
         # overnight.
+        self.unsolved: int = 0          # set by the last WCS check
         self.sync_proc: subprocess.Popen | None = None
         self.sync_vars: dict[str, tk.StringVar] = {}
 
@@ -251,8 +253,10 @@ class App(tk.Tk):
         bar.pack(fill="x", padx=10, pady=4)
         self.btn_cal = ttk.Button(bar, text="1. Calibrate", command=self._calibrate)
         self.btn_chk = ttk.Button(bar, text="2. Check WCS", command=self._check)
+        self.btn_solve = ttk.Button(bar, text="2b. Plate solve",
+                                    command=self._solve, state="disabled")
         self.btn_run = ttk.Button(bar, text="3. Run photometry", command=self._run)
-        for b in (self.btn_cal, self.btn_chk, self.btn_run):
+        for b in (self.btn_cal, self.btn_chk, self.btn_solve, self.btn_run):
             b.pack(side="left", padx=4)
         self.btn_stop = ttk.Button(bar, text="Stop", command=self._stop,
                                    state="disabled")
@@ -341,6 +345,13 @@ class App(tk.Tk):
             f"WHERE UPPER(pl_name) LIKE UPPER('{safe}%')",
         ]
 
+        def fetch(adql_text):
+            url = ("https://exoplanetarchive.ipac.caltech.edu/TAP/sync?query="
+                   + urllib.parse.quote(adql_text) + "&format=json")
+            req = urllib.request.Request(url, headers={"User-Agent": "transitphot"})
+            with urllib.request.urlopen(req, timeout=90) as r:
+                return json.load(r)
+
         rows = None
         last_err = None
         for attempt, adql in enumerate(queries, 1):
@@ -372,7 +383,31 @@ class App(tk.Tk):
                     f"'Kepler-17 b', 'WASP-10 b'.\n")
             return
 
-        r0 = rows[0]
+        r0 = dict(rows[0])
+
+        # pscomppars holds one merged row per planet, and its ephemeris is
+        # often the discovery paper's. A period error of a few times 1e-6 d
+        # accumulates to tens of minutes over a few thousand orbits — enough
+        # to make a good measurement look like a large timing anomaly. Prefer
+        # the most recently published transit ephemeris from the per-reference
+        # table when one exists.
+        try:
+            eph = fetch(
+                "SELECT pl_tranmid, pl_orbper, pl_refname FROM ps "
+                f"WHERE pl_name = '{r0['pl_name']}' "
+                "AND pl_tranmid IS NOT NULL AND pl_orbper IS NOT NULL "
+                "ORDER BY pl_pubdate DESC")
+            if eph:
+                e0 = eph[0]
+                r0["pl_tranmid"] = e0["pl_tranmid"]
+                r0["pl_orbper"] = e0["pl_orbper"]
+                ref = (e0.get("pl_refname") or "").strip()
+                self.q.put(f"  using the most recent ephemeris"
+                           + (f" ({ref[:70]})" if ref else "") + "\n")
+        except Exception as exc:                        # noqa: BLE001
+            self.q.put(f"  could not fetch a newer ephemeris ({exc}); "
+                       f"using the archive default — check the epoch if O-C "
+                       f"looks large\n")
 
         def put(key, val, fmt="{:.6g}"):
             if val is not None:
@@ -407,6 +442,32 @@ class App(tk.Tk):
                 cmd += [flag, v]
         self.pending_plot = None
         self._launch(cmd, "Calibrating…")
+
+    def _solve(self):
+        """Plate solve the calibrated frames with ASTAP."""
+        v = {k: var.get().strip() for k, var in self.vars.items()}
+        if not v.get("ra") or not v.get("dec"):
+            messagebox.showwarning(
+                "TransitPlanner Processor",
+                "Enter the target RA and Dec first — solving is much faster "
+                "when ASTAP is told roughly where to look.")
+            return
+        cmd = self._base_cmd("solve") + [
+            "--lights", self._calibrated_dir(),
+            "--ra", v["ra"], "--dec", v["dec"]]
+        fov = self._field_height_deg(v)
+        if fov:
+            cmd += ["--fov", f"{fov:.3f}"]
+        self.pending_plot = None
+        self._launch(cmd, "Plate solving…")
+
+    def _field_height_deg(self, v) -> float | None:
+        """Field height from focal length and a 15.7 mm sensor, if known."""
+        try:
+            fl = float(v.get("focal_length_mm") or 0)
+            return 57.3 * 15.7 / fl if fl > 0 else None
+        except (TypeError, ValueError):
+            return None
 
     def _check(self):
         self.pending_plot = None
@@ -517,6 +578,18 @@ class App(tk.Tk):
                         self._show_plot(self.pending_plot)
                     self.pending_plot = None
                 else:
+                    # The check reports how many frames lack a WCS. Enable
+                    # plate solving when it finds any, so the fix is one
+                    # click rather than a command to look up.
+                    m = re.search(r"(\d+) frames?: .*?(\d+) without", item)
+                    if m:
+                        self.unsolved = int(m.group(2))
+                        self.btn_solve.config(
+                            state=("normal" if self.unsolved else "disabled"))
+                        if self.unsolved:
+                            self.status.config(
+                                text=f"{self.unsolved} frame(s) need plate "
+                                     f"solving — use 2b")
                     self._say(item)
         except queue.Empty:
             pass

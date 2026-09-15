@@ -61,7 +61,7 @@ def measure_fwhm(data: np.ndarray, xy: tuple[float, float],
 
 
 def session_fwhm(paths, positions_fn, sample: int = 15,
-                 default: float = 4.0) -> float:
+                 default: float = 4.0, report: bool = False) -> float:
     """
     One FWHM for the whole session, from a sample of frames.
 
@@ -87,6 +87,13 @@ def session_fwhm(paths, positions_fn, sample: int = 15,
         except Exception:                            # noqa: BLE001
             continue
     if not vals:
+        if report:
+            # Silently falling back here hides the most common setup error:
+            # coordinates that belong to a different target. Say so now
+            # rather than failing obscurely several minutes later.
+            print(f"WARNING: no star found at the target position in any "
+                  f"sampled frame — falling back to FWHM {default} px. "
+                  f"Check that the coordinates match this data.")
         return default
     # 80th percentile: size for the poorer-seeing frames so no frame has its
     # star spilling outside the aperture.
@@ -387,3 +394,29 @@ def transparency_mask(comp_flux: np.ndarray, min_fraction: float = 0.6):
         return np.ones(total.shape, dtype=bool), np.ones_like(total)
     frac = total / ref
     return frac > min_fraction, frac
+
+
+def field_radius_arcmin(header, default: float = 20.0) -> float:
+    """
+    Half-diagonal of the frame in arcminutes, read from its WCS.
+
+    Comparison stars are searched within a radius of the target, and a fixed
+    default is wrong in both directions: on a narrow field it selects stars
+    that fall outside the frame and can never be measured, and on a wide one
+    it ignores good candidates. The frame knows its own size, so ask it.
+    """
+    try:
+        from astropy.wcs import WCS
+        from astropy.wcs.utils import proj_plane_pixel_scales
+        w = WCS(header)
+        if not w.has_celestial:
+            return default
+        scale = float(np.mean(np.abs(
+            proj_plane_pixel_scales(w.celestial)))) * 60.0   # arcmin/px
+        nx = int(header.get("NAXIS1") or 0)
+        ny = int(header.get("NAXIS2") or 0)
+        if not (nx and ny and np.isfinite(scale) and scale > 0):
+            return default
+        return float(np.clip(0.5 * math.hypot(nx, ny) * scale, 2.0, 120.0))
+    except Exception:                                # noqa: BLE001
+        return default
