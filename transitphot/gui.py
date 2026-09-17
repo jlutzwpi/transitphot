@@ -546,7 +546,8 @@ class App(tk.Tk):
             # Force UTF-8 in the child and decode as UTF-8 here. Without
             # this, Windows hands the subprocess a cp1252 stdout and any
             # non-Latin-1 character in the output kills the run.
-            env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1")
+            env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1",
+                       PYTHONUNBUFFERED="1")
             self.proc = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, bufsize=1, encoding="utf-8", errors="replace",
@@ -649,7 +650,8 @@ class App(tk.Tk):
 
     def _sync_worker(self, cmd):
         try:
-            env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1")
+            env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1",
+                       PYTHONUNBUFFERED="1")
             self.sync_proc = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, bufsize=1, encoding="utf-8", errors="replace",

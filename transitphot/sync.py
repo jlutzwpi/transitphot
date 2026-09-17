@@ -148,7 +148,7 @@ def copy_new(source: Path, dest: Path, throttle_s: float = 0.5,
             tmp.unlink(missing_ok=True)
             skipped += 1
 
-        if copied % 25 == 0 and copied:
+        if copied % 10 == 0 and copied:
             print(f"  copied {copied}/{len(files)}")
         time.sleep(throttle_s)
 

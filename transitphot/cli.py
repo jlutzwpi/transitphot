@@ -106,6 +106,40 @@ def cmd_run(args):
           + ", ".join(f"{r:.1f}" for r in RADII)
           + f" px | sky annulus {R_IN:.1f}-{R_OUT:.1f} px")
 
+    # Comparison stars can be selected inside the search radius but still
+    # fall off the sensor: the radius is a half-diagonal, while a star near
+    # the short axis has far less room. Check once on the reference frame and
+    # drop those, rather than failing every frame because one comparison is
+    # permanently absent.
+    from astropy.io import fits as _fits
+    try:
+        _hdr = _fits.getheader(paths[0])
+        _data = _fits.getdata(paths[0])
+        _h, _w = _data.shape
+        keep_comps, off = [], []
+        for c in comps:
+            try:
+                cx, cy = ph.sky_to_pixel(_hdr, c.ra_deg, c.dec_deg)
+            except Exception:                            # noqa: BLE001
+                off.append(c); continue
+            margin = 60
+            if margin <= cx <= _w - margin and margin <= cy <= _h - margin:
+                keep_comps.append(c)
+            else:
+                off.append(c)
+        if off:
+            print(f"Dropping {len(off)} comparison star(s) that fall outside "
+                  f"the frame ({', '.join(f'G={c.mag:.2f} at {c.sep_arcmin:.1f}' + chr(39) for c in off)})")
+            comps = keep_comps
+        if len(comps) < 2:
+            raise SystemExit(
+                "Fewer than two comparison stars fall inside the frame. "
+                "Reduce --radius, or check that the field is as expected.")
+    except SystemExit:
+        raise
+    except Exception as exc:                             # noqa: BLE001
+        print(f"  (could not pre-check comparison positions: {exc})")
+
     times, tflux, cflux = [], [], []
     ref_snapshot = None          # (data, header, positions, aperture radii)
     n_rejected = n_done = 0
@@ -126,12 +160,15 @@ def cmd_run(args):
         # the target or a comparison isn't detectable has a bad WCS (stale
         # solutions around a meridian flip are the usual cause) or was lost
         # to cloud — measuring it would inject a wild flux ratio.
-        refined, all_ok = [], True
+        refined, oks = [], []
         for xy in positions:
             rx, ry, ok = ph.refine_position(data, xy)
             refined.append((rx, ry))
-            all_ok &= ok
-        if not all_ok:
+            oks.append(ok)
+        # The target must be there; a comparison that is momentarily lost
+        # (cloud, a cosmic ray, drifting near an edge) costs that star for
+        # this frame, not the whole frame.
+        if not oks[0] or sum(oks[1:]) < 2:
             n_rejected += 1
             continue
         positions = refined
@@ -466,10 +503,21 @@ def cmd_run(args):
             print("The fitted values printed above are still valid.")
 
 def cmd_sync(args):
-    from .sync import copy_new, wait_until_clock, wait_until_idle
+    from .sync import copy_new, wait_until_clock, wait_until_idle, _fits_files
     src, dst = Path(args.source), Path(args.dest)
+    print(f"Source: {src}")
+    print(f"Destination: {dst}")
     if not src.exists():
-        raise SystemExit(f"Source not reachable: {src}")
+        raise SystemExit(
+            f"Source not reachable: {src}\n"
+            f"If this is a network share, check the processing PC can open it "
+            f"in Explorer — a share needing credentials will hang rather than "
+            f"fail cleanly.")
+    found = _fits_files(src)
+    print(f"Found {len(found)} FITS file(s) under the source")
+    if not found:
+        raise SystemExit("Nothing to copy. Check the folder contains .fit/"
+                         ".fits/.fts files (subfolders are searched too).")
 
     if args.start:
         wait_until_clock(args.start)
