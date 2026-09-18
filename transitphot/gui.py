@@ -400,15 +400,22 @@ class App(tk.Tk):
         import math
         import time as _time
 
-        try:
-            eph = fetch(
-                "SELECT pl_tranmid, pl_tranmiderr1, pl_orbper, pl_orbpererr1, "
-                "pl_refname, pl_pubdate FROM ps "
-                f"WHERE pl_name = '{r0['pl_name']}' "
-                "AND pl_tranmid IS NOT NULL AND pl_orbper IS NOT NULL")
-        except Exception as exc:                        # noqa: BLE001
-            eph = None
-            self.q.put(f"  could not fetch published ephemerides ({exc}); "
+        eph = None
+        q_eph = (
+            "SELECT pl_tranmid, pl_tranmiderr1, pl_orbper, pl_orbpererr1, "
+            "pl_refname, pl_pubdate FROM ps "
+            f"WHERE pl_name = '{r0['pl_name']}' "
+            "AND pl_tranmid IS NOT NULL AND pl_orbper IS NOT NULL")
+        for delay in (0, 4):
+            if delay:
+                _time.sleep(delay)      # the archive rate-limits rapid queries
+            try:
+                eph = fetch(q_eph)
+                break
+            except Exception as exc:                    # noqa: BLE001
+                last = exc
+        if eph is None:
+            self.q.put(f"  could not compare published ephemerides ({last}); "
                        f"using the archive default\n")
 
         if eph:
@@ -440,6 +447,27 @@ class App(tk.Tk):
                     f"  ephemeris predicting tonight most precisely "
                     f"(+/-{best_unc * 1440:.1f} min)"
                     + (f": {ref[:70]}" if ref else "") + "\n")
+
+        # Whatever ephemeris ends up in the fields, say how precisely it
+        # predicts a transit now. An O-C is only as meaningful as the
+        # prediction it is measured against, and a stale or coarsely
+        # published ephemeris can be uncertain by more than the measurement.
+        try:
+            E = float(r0["pl_tranmid"]); P = float(r0["pl_orbper"])
+            n = abs(round((_time.time() / 86400.0 + 2440587.5 - E) / P))
+            dE = abs(float(r0.get("pl_tranmiderr1") or 0.0))
+            dP = abs(float(r0.get("pl_orbpererr1") or 0.0))
+            if dE == 0 and dP == 0:
+                dP = 10 ** -max(len(repr(P).split(".")[-1]), 1)
+                dE = 10 ** -max(len(repr(E).split(".")[-1]), 1)
+            unc = math.sqrt(dE ** 2 + (n * dP) ** 2) * 1440
+            msg = (f"  this ephemeris predicts a transit now to "
+                   f"+/-{unc:.1f} min ({n} orbits since epoch)")
+            if unc > 3:
+                msg += " — large enough to dominate an O-C; check for a newer one"
+            self.q.put(msg + "\n")
+        except Exception:                               # noqa: BLE001
+            pass
 
         def put(key, val, fmt="{:.6g}"):
             if val is not None:
