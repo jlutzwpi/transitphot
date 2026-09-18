@@ -209,7 +209,7 @@ class App(tk.Tk):
                   text="Site values persist between sessions - enter them once.\n"
                        "An AAVSO observer code enables the report file; it is "
                        "stored locally, never in the repository."
-                  ).grid(row=8, column=2, columnspan=2, sticky="w", **pad)
+                  ).grid(row=11, column=2, columnspan=2, sticky="w", **pad)
 
         # --- Options tab ---
         f3 = ttk.Frame(nb)
