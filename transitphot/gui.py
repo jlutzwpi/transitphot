@@ -390,29 +390,56 @@ class App(tk.Tk):
 
         r0 = dict(rows[0])
 
-        # pscomppars holds one merged row per planet, and its ephemeris is
-        # often the discovery paper's. A period error of a few times 1e-6 d
-        # accumulates to tens of minutes over a few thousand orbits — enough
-        # to make a good measurement look like a large timing anomaly. Prefer
-        # the most recently published transit ephemeris from the per-reference
-        # table when one exists.
+        # pscomppars holds one merged row per planet and its ephemeris is
+        # often the discovery paper's. Choosing between published
+        # ephemerides by publication date is wrong: a newer paper may report
+        # coarser values, and what matters is which one predicts TONIGHT
+        # most precisely. Uncertainty in a predicted mid-time grows as
+        # sqrt(dTc^2 + (n*dP)^2), so a small period error beats a recent
+        # date. Pick the ephemeris that minimises that.
+        import math
+        import time as _time
+
         try:
             eph = fetch(
-                "SELECT pl_tranmid, pl_orbper, pl_refname FROM ps "
+                "SELECT pl_tranmid, pl_tranmiderr1, pl_orbper, pl_orbpererr1, "
+                "pl_refname, pl_pubdate FROM ps "
                 f"WHERE pl_name = '{r0['pl_name']}' "
-                "AND pl_tranmid IS NOT NULL AND pl_orbper IS NOT NULL "
-                "ORDER BY pl_pubdate DESC")
-            if eph:
-                e0 = eph[0]
-                r0["pl_tranmid"] = e0["pl_tranmid"]
-                r0["pl_orbper"] = e0["pl_orbper"]
-                ref = (e0.get("pl_refname") or "").strip()
-                self.q.put(f"  using the most recent ephemeris"
-                           + (f" ({ref[:70]})" if ref else "") + "\n")
+                "AND pl_tranmid IS NOT NULL AND pl_orbper IS NOT NULL")
         except Exception as exc:                        # noqa: BLE001
-            self.q.put(f"  could not fetch a newer ephemeris ({exc}); "
-                       f"using the archive default — check the epoch if O-C "
-                       f"looks large\n")
+            eph = None
+            self.q.put(f"  could not fetch published ephemerides ({exc}); "
+                       f"using the archive default\n")
+
+        if eph:
+            now_jd = _time.time() / 86400.0 + 2440587.5
+            best, best_unc = None, float("inf")
+            for e in eph:
+                try:
+                    E, P = float(e["pl_tranmid"]), float(e["pl_orbper"])
+                    if P <= 0:
+                        continue
+                    n = abs(round((now_jd - E) / P))
+                    dE = abs(float(e.get("pl_tranmiderr1") or 0.0))
+                    dP = abs(float(e.get("pl_orbpererr1") or 0.0))
+                    if dE == 0 and dP == 0:
+                        # No published uncertainties: infer precision from the
+                        # number of decimals actually reported.
+                        dP = 10 ** -max(len(repr(P).split(".")[-1]), 1)
+                        dE = 10 ** -max(len(repr(E).split(".")[-1]), 1)
+                    unc = math.sqrt(dE ** 2 + (n * dP) ** 2)
+                except (TypeError, ValueError):
+                    continue
+                if unc < best_unc:
+                    best, best_unc = e, unc
+            if best is not None:
+                r0["pl_tranmid"] = best["pl_tranmid"]
+                r0["pl_orbper"] = best["pl_orbper"]
+                ref = (best.get("pl_refname") or "").strip()
+                self.q.put(
+                    f"  ephemeris predicting tonight most precisely "
+                    f"(+/-{best_unc * 1440:.1f} min)"
+                    + (f": {ref[:70]}" if ref else "") + "\n")
 
         def put(key, val, fmt="{:.6g}"):
             if val is not None:

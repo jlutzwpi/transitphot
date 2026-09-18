@@ -103,9 +103,42 @@ def make_finder_chart(data: np.ndarray, target_xy: tuple[float, float],
     ax.set_xlabel("x (pixels)")
     ax.set_ylabel("y (pixels)")
     fig.tight_layout()
-    fig.savefig(out, dpi=140)
+    _save_figure(fig, Path(out))
     plt.close(fig)
     return Path(out)
+
+
+def _save_figure(fig, out: Path, dpi: int = 140):
+    """
+    Save a figure, working around Windows write failures.
+
+    Some paths that look ordinary refuse a direct write with EINVAL — a
+    viewer holding the previous file, a network or synced folder, or a
+    backend quirk. Writing to a buffer and then to disk sidesteps whatever
+    matplotlib does with the filename, and a temp-then-replace keeps a failed
+    write from leaving a truncated image behind.
+    """
+    import io
+    import os
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=dpi)
+    data = buf.getvalue()
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out.with_name(out.name + ".part")
+    try:
+        with open(tmp, "wb") as fh:
+            fh.write(data)
+        os.replace(tmp, out)
+    except OSError:
+        # Last resort: the folder may be the problem, not the figure.
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        with open(out, "wb") as fh:
+            fh.write(data)
 
 
 def save_reference_frame(data: np.ndarray, header, out: Path) -> Path:

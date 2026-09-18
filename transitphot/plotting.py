@@ -110,5 +110,6 @@ def plot_lightcurve(bjd, flux, flux_err=None, fit_result=None,
 
     (axes[1] if show_resid else ax).set_xlabel(f"hours (BJD_TDB - {t0:.0f})")
     fig.tight_layout()
-    fig.savefig(out, dpi=140)
+    from .annotate import _save_figure
+    _save_figure(fig, Path(out))
     return out

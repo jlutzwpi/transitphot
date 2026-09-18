@@ -327,8 +327,9 @@ def cmd_run(args):
           print(f"            {reg.name} + {ref.name} — load the .reg over the "
                 f"FITS in DS9 or AstroImageJ to check placement at full resolution")
       except Exception as exc:                          # noqa: BLE001
-        print(f"WARNING: could not write validation artifacts ({exc}). "
-              f"The light curve and fit are unaffected.")
+        print(f"WARNING: could not write validation artifacts "
+              f"({type(exc).__name__}: {exc}). "
+              f"The light curve, fit and AAVSO report are unaffected.")
 
     # Predicted mid-time from the archive ephemeris, for whichever transit
     # this session actually covers.
