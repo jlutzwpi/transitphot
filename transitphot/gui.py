@@ -195,7 +195,10 @@ class App(tk.Tk):
         site_fields = [("lat", "Latitude (deg)"),
                        ("lon", "Longitude (deg, E+)"),
                        ("elevation", "Elevation (m)"),
-                       ("filter_band", "Filter (R, L, V...)")]
+                       ("filter_band", "Filter (R, L, V...)"),
+                       ("aavso_obscode", "AAVSO observer code"),
+                       ("aavso_filter", "AAVSO filter code"),
+                       ("binning", "Binning (1x1, 2x2)")]
         for r, (key, label) in enumerate(site_fields, start=4):
             ttk.Label(f2, text=label).grid(row=r, column=2, sticky="w", **pad)
             var = tk.StringVar()
@@ -203,7 +206,9 @@ class App(tk.Tk):
             ttk.Entry(f2, textvariable=var, width=22).grid(
                 row=r, column=3, sticky="w", **pad)
         ttk.Label(f2, foreground="#555", justify="left",
-                  text="Site values persist between sessions - enter them once."
+                  text="Site values persist between sessions - enter them once.\n"
+                       "An AAVSO observer code enables the report file; it is "
+                       "stored locally, never in the repository."
                   ).grid(row=8, column=2, columnspan=2, sticky="w", **pad)
 
         # --- Options tab ---
@@ -516,6 +521,12 @@ class App(tk.Tk):
             if v.get(key):
                 cmd += [flag, v[key]]
         cmd += ["--model", self.model.get()]
+        if v.get("aavso_obscode"):
+            cmd += ["--aavso-obscode", v["aavso_obscode"]]
+            if v.get("aavso_filter"):
+                cmd += ["--aavso-filter", v["aavso_filter"]]
+            if v.get("binning"):
+                cmd += ["--binning", v["binning"]]
         if self.fix_duration.get():
             cmd.append("--fix-duration")
         if self.min_transparency.get().strip():

@@ -464,7 +464,7 @@ def cmd_run(args):
                   f"({'late' if oc > 0 else 'early'}) [both BJD_TDB]")
 
         try:
-            from .export import write_lightcurve, write_summary
+            from .export import write_lightcurve, write_summary, write_aavso
             meta = {"target_ra_deg": args.ra, "target_dec_deg": args.dec,
                     "n_comparison_stars": int(keep.sum()),
                     "time_system": "BJD_TDB" if args.lat is not None else "JD_UTC"}
@@ -472,6 +472,48 @@ def cmd_run(args):
             write_lightcurve(base.with_suffix(".txt"), bjd, norm, err, meta)
             write_summary(base.with_name(base.name + "_summary.json"), res, meta,
                           args.predicted_mid)
+
+            if args.aavso_obscode:
+                planet = args.target_name or "unknown"
+                star = args.star_name or planet.rstrip().removesuffix(" b")
+                from .export import aavso_filter
+                # An explicit --aavso-filter wins; otherwise map the imaging
+                # filter to a ShortName and carry its description into NOTES,
+                # which the format requires whenever the code is "O".
+                if args.aavso_filter:
+                    filt, filt_desc = args.aavso_filter.upper(), ""
+                else:
+                    filt, filt_desc = aavso_filter(args.filter_band)
+                    if filt_desc:
+                        print(f"  filter {args.filter_band} -> AAVSO '{filt}' "
+                              f"({filt_desc})")
+                priors = (f"period {args.period_days} d; "
+                          f"duration {args.duration_hours} h fixed; "
+                          f"depth prior {args.depth_ppm} ppm; "
+                          f"quadratic limb darkening u1=0.35 u2=0.25")
+                results = (f"Tc={res.mid_bjd:.5f} BJD_TDB "
+                           f"+/-{res.mid_err_minutes:.1f} min; "
+                           f"depth={res.depth_ppm:.0f}+/-{res.depth_err*1e6:.0f} "
+                           f"ppm; duration={res.duration_days*24:.2f} h; "
+                           f"residual RMS={res.rms_ppm:.0f} ppm")
+                notes = ((f"Filter: {filt_desc}. " if filt_desc else "")
+                         + f"{len(bjd)} points. Aperture {RADII[best_i]:.1f} px, "
+                         f"sky annulus {R_IN:.1f}-{R_OUT:.1f} px, "
+                         f"{int(keep.sum())} comparison stars. "
+                         f"Reduced with transitphot (CMOS sensor reported as "
+                         f"CCD per format).")
+                ap = write_aavso(
+                    base.with_name(base.name + "_aavso.txt"),
+                    bjd, norm, err,
+                    obscode=args.aavso_obscode,
+                    star_name=star, exoplanet_name=planet,
+                    exposure_s=(args.exposure_s if hasattr(args, "exposure_s")
+                                else 0),
+                    filter_code=filt, binning=args.binning,
+                    ra=f"{args.ra:.6f}", dec=f"{args.dec:+.6f}",
+                    priors=priors, results=results, notes=notes,
+                    airmass=air)
+                print(f"  wrote {ap.name} (AAVSO Exoplanet Database report)")
             print(f"  wrote {base.with_suffix('.txt').name} and "
                   f"{base.name}_summary.json")
 
@@ -627,6 +669,17 @@ def main():
     r.add_argument("--duration-hours", type=float)
     r.add_argument("--depth-ppm", type=float)
     r.add_argument("--plot", help="write a PNG light curve to this path")
+    r.add_argument("--aavso-obscode", dest="aavso_obscode",
+                   help="your AAVSO observer code; supplying it writes an "
+                        "AAVSO Exoplanet Database report file")
+    r.add_argument("--aavso-filter", dest="aavso_filter",
+                   help="AAVSO filter ShortName (e.g. R, V, CV for clear). "
+                        "Defaults to --filter if it is a valid designation.")
+    r.add_argument("--binning", default="1x1",
+                   help="camera binning as AAVSO expects it (1x1, 2x2...)")
+    r.add_argument("--star-name", dest="star_name",
+                   help="host star name for the AAVSO report; defaults to the "
+                        "target name with any trailing planet letter removed")
     r.add_argument("--fwhm", type=float,
                    help="override the measured session FWHM, in pixels")
     r.add_argument("--min-transparency", type=float, default=0.6,
