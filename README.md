@@ -1,10 +1,13 @@
-# transitphot
+# TransitPlanner Processor
 
 Local FITS-to-light-curve pipeline for exoplanet transit photometry.
 Companion to [TransitPlanner](https://transits.justinlutz.com).
 
 Your data stays on your machine — only the finished light curve is small
 enough to share, and only if you choose to.
+
+<img width="2640" height="491" alt="transitplanner-pipeline-wide" src="https://github.com/user-attachments/assets/e0a57c7e-4993-480a-bd53-a310663c24ae" />
+
 
 ## GUI
 
@@ -85,4 +88,4 @@ bright star, a comparison that's actually a close double.
 
 Early. Calibration, alignment, comparison selection and differential
 photometry are implemented; BJD_TDB conversion, transit model fitting and
-ExoClock-format export are next.
+AAVSO-format export were just implemented!
