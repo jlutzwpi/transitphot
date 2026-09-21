@@ -1,4 +1,4 @@
-# transitphot
+# transitphot (aka TransitPlanner Processor)
 
 Local FITS-to-light-curve pipeline for exoplanet transit photometry.
 Companion to [TransitPlanner](https://transits.justinlutz.com).
@@ -11,7 +11,7 @@ enough to share, and only if you choose to.
     pip install "transitphot[serve]"
     transitphot serve
 
-Prints a URL with a token. Open it on a phone over your LAN, or over
+Prints a URL with a token and a QR code. Open it on a phone over your LAN, or over
 Tailscale from anywhere — the same reachability most people already use for
 their imaging computer. Pick a target, tap Start, and the whole chain runs
 on the processing computer where the frames live: wait for the capture
@@ -111,4 +111,4 @@ bright star, a comparison that's actually a close double.
 
 Early. Calibration, alignment, comparison selection and differential
 photometry are implemented; BJD_TDB conversion, transit model fitting and
-ExoClock-format export are next.
+AAVSO-format export are now implemented!
