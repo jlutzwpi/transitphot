@@ -21,7 +21,7 @@ align = ["astroalign>=2.5"]
 # uses. Optional: a numpy integrator covers the same physics without it.
 ld = ["batman-package>=2.4"]
 # Only needed for `transitphot serve`, the phone-friendly web front end.
-serve = ["fastapi>=0.110", "uvicorn>=0.27"]
+serve = ["fastapi>=0.110", "uvicorn>=0.27", "segno>=1.5"]
 
 [project.scripts]
 transitphot = "transitphot.cli:main"

@@ -624,7 +624,8 @@ def cmd_serve(args):
         raise SystemExit(
             f"The web server needs FastAPI and uvicorn ({exc}).\n"
             f'  pip install "transitphot[serve]"') from exc
-    serve(host=args.host, port=args.port, use_token=not args.no_token)
+    serve(host=args.host, port=args.port, use_token=not args.no_token,
+          new_token=args.new_token)
 
 
 def cmd_night(args):
@@ -792,6 +793,8 @@ def main():
     sv.add_argument("--port", type=int, default=8765)
     sv.add_argument("--no-token", action="store_true", dest="no_token",
                     help="skip the URL token; only on a trusted network")
+    sv.add_argument("--new-token", action="store_true", dest="new_token",
+                    help="replace the saved token; earlier addresses stop working")
     sv.set_defaults(func=cmd_serve)
 
     k = sub.add_parser("check", help="report which frames have a usable WCS")

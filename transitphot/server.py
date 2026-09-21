@@ -287,7 +287,8 @@ async function stop() {
 </script></body></html>"""
 
 
-def build_app(token: Optional[str]):
+def build_app(token: Optional[str], urls: Optional[list] = None):
+    urls = urls or []
     app = FastAPI(title="transitphot serve")
     state = {"proc": None, "queue": None, "plot": None, "task": None}
 
@@ -295,6 +296,51 @@ def build_app(token: Optional[str]):
         if token and request.query_params.get("t") != token \
                 and request.headers.get("x-token") != token:
             raise HTTPException(401, "Missing or wrong token")
+
+    @app.get("/qr", response_class=HTMLResponse)
+    def qr_page(request: Request):
+        """
+        QR codes for getting the URL onto a phone.
+
+        This page contains the token, so it is served ONLY to this computer.
+        Anyone else on the network asking for it gets a 403 — otherwise the
+        page that exists to share access would hand it to everyone.
+        """
+        client = request.client.host if request.client else ""
+        if client not in ("127.0.0.1", "::1", "localhost"):
+            raise HTTPException(403, "The QR page is only shown on the "
+                                     "computer running the server.")
+        cards = []
+        for label, url in urls:
+            svg = _qr_svg(url)
+            code = (svg if svg else
+                    "<p style='color:#8B94A7'>Install segno for a scannable "
+                    "code: <code>pip install segno</code></p>")
+            cards.append(
+                f"<div class='card'><h2>{label}</h2>{code}"
+                f"<p class='url'>{url}</p></div>")
+        body = "".join(cards) or "<p>No reachable addresses found.</p>"
+        return HTMLResponse(f"""<!DOCTYPE html><html><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Open on your phone</title>
+<style>
+ body {{ background:#0B1220; color:#E7E9F0; font:16px system-ui,sans-serif;
+        margin:0; padding:28px; }}
+ h1 {{ font-size:20px; font-weight:600; margin:0 0 6px; }}
+ .sub {{ color:#8B94A7; margin:0 0 24px; }}
+ .wrap {{ display:flex; gap:24px; flex-wrap:wrap; }}
+ .card {{ background:#111B2E; border:1px solid #1D2A42; border-radius:10px;
+         padding:18px; width:300px; }}
+ .card h2 {{ font-size:15px; font-weight:600; margin:0 0 12px; }}
+ .card svg {{ width:100%; height:auto; background:#fff; border-radius:6px;
+             padding:10px; box-sizing:border-box; }}
+ .url {{ font:12px ui-monospace,monospace; color:#8B94A7;
+        word-break:break-all; margin:12px 0 0; }}
+</style></head><body>
+<h1>Open TransitPlanner Processor on your phone</h1>
+<p class="sub">Scan with the phone camera, then bookmark or add it to your
+home screen. The address stays the same between restarts.</p>
+<div class="wrap">{body}</div></body></html>""")
 
     @app.get("/", response_class=HTMLResponse)
     def index(request: Request):
@@ -545,26 +591,131 @@ def build_app(token: Optional[str]):
     return app
 
 
-def serve(host: str = "0.0.0.0", port: int = 8765, use_token: bool = True):
+def _qr_svg(url: str) -> str:
+    """An inline SVG QR code, or "" if segno isn't installed."""
+    try:
+        import segno
+    except ImportError:
+        return ""
+    return segno.make(url, error="m").svg_inline(scale=6, dark="#0B1220",
+                                                 light="#FFFFFF")
+
+
+def _qr_terminal(url: str) -> bool:
+    """Print a QR code to the terminal. False if segno isn't installed."""
+    try:
+        import segno
+    except ImportError:
+        return False
+    try:
+        segno.make(url, error="m").terminal(compact=True)
+        return True
+    except Exception:                                    # noqa: BLE001
+        return False
+
+
+def _persistent_token(renew: bool = False) -> str:
+    """
+    One token kept in the settings file, so the URL is the same every time
+    the server starts and a phone bookmark keeps working. --new-token
+    replaces it, which revokes every URL handed out before.
+    """
+    s = load_settings()
+    tok = s.get("serve_token")
+    if renew or not tok:
+        tok = secrets.token_urlsafe(12)
+        save_settings({"serve_token": tok})
+    return tok
+
+
+def _local_addresses():
+    """
+    The addresses a phone might use to reach this computer.
+
+    gethostbyname(gethostname()) is unreliable on Windows: it often returns
+    a Hyper-V, VPN or Tailscale adapter rather than the Wi-Fi one. Asking the
+    OS which interface it would route an outbound packet through gives the
+    real LAN address (no packet is actually sent). Tailscale's 100.64.0.0/10
+    addresses are reported separately, since they only work over the tailnet.
+    """
+    import ipaddress
+    import socket
+
+    primary = None
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("192.0.2.1", 80))        # TEST-NET; nothing is transmitted
+        primary = s.getsockname()[0]
+        s.close()
+    except OSError:
+        pass
+
+    found = set()
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None,
+                                       socket.AF_INET):
+            found.add(info[4][0])
+    except OSError:
+        pass
+    if primary:
+        found.add(primary)
+
+    cgnat = ipaddress.ip_network("100.64.0.0/10")
+    lan, tailscale, others = None, None, []
+    for a in sorted(found):
+        ip = ipaddress.ip_address(a)
+        if ip.is_loopback or ip.is_link_local:
+            continue
+        if ip in cgnat:
+            tailscale = a
+        elif a == primary:
+            lan = a
+        elif ip.is_private:
+            others.append(a)
+    if lan is None and others:
+        lan = others.pop(0)
+    return lan, tailscale, others
+
+
+def serve(host: str = "0.0.0.0", port: int = 8765, use_token: bool = True,
+          new_token: bool = False):
     import uvicorn
 
-    token = secrets.token_urlsafe(8) if use_token else None
-    app = build_app(token)
+    token = _persistent_token(renew=new_token) if use_token else None
 
-    import socket
-    try:
-        lan = socket.gethostbyname(socket.gethostname())
-    except Exception:                                    # noqa: BLE001
-        lan = "your-computer"
-
+    lan, tailscale, others = _local_addresses()
     q = f"?t={token}" if token else ""
+    urls = []
+    if lan:
+        urls.append(("On your home Wi-Fi", f"http://{lan}:{port}/{q}"))
+    if tailscale:
+        urls.append(("Over Tailscale", f"http://{tailscale}:{port}/{q}"))
+    for a in others:
+        urls.append((f"Also on {a}", f"http://{a}:{port}/{q}"))
+
+    app = build_app(token, urls)
+
     print("transitphot serve")
     print(f"  on this machine : http://localhost:{port}/{q}")
-    print(f"  on the LAN      : http://{lan}:{port}/{q}")
-    print(f"  over Tailscale  : http://<tailscale-name>:{port}/{q}")
+    for label, url in urls:
+        print(f"  {label:16s}: {url}")
+
+    print(f"\nTo open it on a phone, visit http://localhost:{port}/qr on "
+          f"this computer\nand scan the code. The address stays the same "
+          f"between restarts, so\nbookmark it once.")
+
+    if urls and _qr_terminal(urls[0][1]):
+        print(f"(Or scan this — {urls[0][0].lower()}.)")
+    elif urls:
+        print("  (pip install segno for scannable QR codes)")
+
     if token:
-        print("\nThe token in the URL is required. It changes each start;")
-        print("pass --no-token to disable it on a trusted network.")
-    print("\nThis runs processes on this computer. Keep it behind Tailscale")
-    print("or a home LAN — never expose the port to the internet.\n")
+        print("\nThe token in the address is required. Run with --new-token "
+              "to replace it,\nwhich stops every earlier address working.")
+    print("\nThis runs processes on this computer. Keep it behind Tailscale "
+          "or a home LAN;\nnever expose the port to the internet.")
+    print("\nIf a phone can't reach it, allow the port through Windows "
+          "Firewall (network set to Private):")
+    print(f'  New-NetFirewallRule -DisplayName "transitphot serve" -Direction '
+          f'Inbound -Protocol TCP -LocalPort {port} -Action Allow -Profile Private\n')
     uvicorn.run(app, host=host, port=port, log_level="warning")
