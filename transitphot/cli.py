@@ -30,6 +30,8 @@ def cmd_calibrate(args):
 
 
 def cmd_run(args):
+    if not getattr(args, "lights", None):
+        raise SystemExit("--lights is required")
     import warnings
     from astropy.wcs import FITSFixedWarning
     # ASIAIR headers lack MJD-OBS; astropy derives it from DATE-OBS and says
@@ -615,6 +617,22 @@ def cmd_solve(args):
               "Re-run to retry only the unsolved ones.")
 
 
+def cmd_serve(args):
+    try:
+        from .server import serve
+    except ImportError as exc:                          # noqa: BLE001
+        raise SystemExit(
+            f"The web server needs FastAPI and uvicorn ({exc}).\n"
+            f'  pip install "transitphot[serve]"') from exc
+    serve(host=args.host, port=args.port, use_token=not args.no_token)
+
+
+def cmd_night(args):
+    from .night import run_night
+    run_night(args, cmd_sync=cmd_sync, cmd_calibrate=cmd_calibrate,
+              cmd_check=cmd_check, cmd_solve=cmd_solve, cmd_run=cmd_run)
+
+
 def main():
     # Windows defaults stdout to cp1252, which cannot encode the characters
     # used in the reports (Delta, multiplication sign, ellipsis). That is
@@ -640,7 +658,7 @@ def main():
     c.set_defaults(func=cmd_calibrate)
 
     r = sub.add_parser("run", help="align, measure, and extract a light curve")
-    r.add_argument("--lights", required=True)
+    r.add_argument("--lights", help="folder of calibrated, plate-solved frames")
     r.add_argument("--ra", type=float, required=True, help="target RA in degrees")
     r.add_argument("--dec", type=float, required=True, help="target Dec in degrees")
     r.add_argument("--target-mag", type=float, required=True)
@@ -740,6 +758,41 @@ def main():
                    help="seconds a file must be size-stable before copying")
     y.add_argument("--dry-run", action="store_true", dest="dry_run")
     y.set_defaults(func=cmd_sync)
+
+    # "night" takes every argument "run" does, plus the sync and calibration
+    # folders, so one command covers copy -> calibrate -> solve -> measure.
+    ngt = sub.add_parser(
+        "night", parents=[r], conflict_handler="resolve",
+        help="the whole chain: wait, copy, calibrate, solve, measure")
+    ngt.add_argument("--source", help="capture device folder to copy from; "
+                                      "omit if the frames are already local")
+    ngt.add_argument("--lights-root", required=True, dest="lights_root",
+                     help="local folder holding (or to receive) the lights")
+    ngt.add_argument("--bias")
+    ngt.add_argument("--darks")
+    ngt.add_argument("--flats")
+    ngt.add_argument("--start", help="wait until this local time (HH:MM)")
+    ngt.add_argument("--after-idle", type=float, dest="after_idle",
+                     default=15.0,
+                     help="start once the source has been unchanged this many "
+                          "minutes (default 15)")
+    ngt.add_argument("--poll", type=float, default=30.0)
+    ngt.add_argument("--fov", type=float, help="field height in degrees, "
+                                               "speeds plate solving")
+    ngt.add_argument("--no-solve", action="store_true", dest="no_solve",
+                     help="skip plate solving; unsolved frames are ignored")
+    ngt.add_argument("--recalibrate", action="store_true",
+                     help="recalibrate even if calibrated frames exist")
+    ngt.set_defaults(func=cmd_night, detrend_airmass=True)
+
+    sv = sub.add_parser("serve",
+                        help="run a phone-friendly web page for this computer")
+    sv.add_argument("--host", default="0.0.0.0",
+                    help="interface to bind (default all, so a phone can reach it)")
+    sv.add_argument("--port", type=int, default=8765)
+    sv.add_argument("--no-token", action="store_true", dest="no_token",
+                    help="skip the URL token; only on a trusted network")
+    sv.set_defaults(func=cmd_serve)
 
     k = sub.add_parser("check", help="report which frames have a usable WCS")
     k.add_argument("--lights", required=True)

@@ -1,4 +1,4 @@
-# TransitPlanner Processor
+# transitphot
 
 Local FITS-to-light-curve pipeline for exoplanet transit photometry.
 Companion to [TransitPlanner](https://transits.justinlutz.com).
@@ -6,8 +6,31 @@ Companion to [TransitPlanner](https://transits.justinlutz.com).
 Your data stays on your machine — only the finished light curve is small
 enough to share, and only if you choose to.
 
-<img width="2640" height="491" alt="transitplanner-pipeline-wide" src="https://github.com/user-attachments/assets/e0a57c7e-4993-480a-bd53-a310663c24ae" />
+## From a phone
 
+    pip install "transitphot[serve]"
+    transitphot serve
+
+Prints a URL with a token. Open it on a phone over your LAN, or over
+Tailscale from anywhere — the same reachability most people already use for
+their imaging computer. Pick a target, tap Start, and the whole chain runs
+on the processing computer where the frames live: wait for the capture
+folder to go quiet, copy, calibrate, plate solve, measure, fit and write the
+AAVSO report. The log streams to the page and the light curve appears when
+it finishes.
+
+`serve` runs processes on your computer. Keep it behind Tailscale or a home
+LAN; never expose the port to the internet.
+
+## The whole night in one command
+
+    transitphot night --source "\\MELE-PC\n.i.n.a\2026-09-16\TOI-3629 b\LIGHT" \
+        --lights-root "D:/xfer/TOI-3629 b" --darks ... --flats ... \
+        --after-idle 15 --ra 359.793 --dec 39.3143 --target-mag 13.8375 \
+        --target-name "TOI-3629 b" --filter L --fit --fix-duration ...
+
+Waits for the capture device to stop writing, then copies, calibrates,
+solves and measures without further input.
 
 ## GUI
 
@@ -88,4 +111,4 @@ bright star, a comparison that's actually a close double.
 
 Early. Calibration, alignment, comparison selection and differential
 photometry are implemented; BJD_TDB conversion, transit model fitting and
-AAVSO-format export were just implemented!
+ExoClock-format export are next.
