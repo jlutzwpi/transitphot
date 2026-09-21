@@ -90,6 +90,17 @@ PAGE = """<!DOCTYPE html>
 <h1>TransitPlanner Processor</h1>
 <p class="sub">Runs on __HOST__ — the frames stay there.</p>
 
+<fieldset><legend>Send a sequence to N.I.N.A.</legend>
+  <label for="nina_dir">N.I.N.A. sequence folder on the capture PC</label>
+  <input id="nina_dir" placeholder="\\\\MELE-PC\\N.I.N.A">
+  <div class="hint">A shared folder this computer can write to — the folder
+    Touch'N'Stars lists sequences from.</div>
+  <label for="seqfile">Sequence exported from TransitPlanner</label>
+  <input id="seqfile" type="file" accept=".json,application/json">
+  <button type="button" id="uploadbtn" onclick="uploadSeq()">Send to capture PC</button>
+  <div id="uploadmsg" class="hint"></div>
+</fieldset>
+
 <fieldset><legend>Folders</legend>
   <label for="source">Capture folder (leave blank if already copied)</label>
   <input id="source" placeholder="\\\\MELE-PC\\n.i.n.a\\2026-09-16\\TARGET\\LIGHT">
@@ -157,7 +168,7 @@ PAGE = """<!DOCTYPE html>
 const F = ["source","lights_root","bias","darks","flats","target_name","ra","dec",
            "target_mag","depth_ppm","duration_hours","filter_band","epoch_bjd",
            "period","after_idle","lat","lon","elevation","binning",
-           "aavso_obscode","aavso_filter"];
+           "aavso_obscode","aavso_filter","nina_dir"];
 const g = id => document.getElementById(id);
 const say = t => { const l = g("log"); l.textContent += t;
                    l.scrollTop = l.scrollHeight; };
@@ -212,6 +223,30 @@ async function lookup() {
     msg.textContent = "Lookup failed: " + e.message;
   } finally {
     g("lookupbtn").disabled = false;
+  }
+}
+
+async function uploadSeq() {
+  const msg = g("uploadmsg");
+  const f = g("seqfile").files[0];
+  const dir = g("nina_dir").value.trim();
+  if (!dir) { msg.textContent = "Enter the N.I.N.A. sequence folder first."; return; }
+  if (!f)   { msg.textContent = "Choose the sequence file first."; return; }
+  g("uploadbtn").disabled = true;
+  msg.textContent = "Sending " + f.name + "…";
+  try {
+    // Save the folder first so the server knows where to write.
+    await api("api/settings", {method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({nina_dir: dir})});
+    const d = await api("api/upload_sequence?name=" + encodeURIComponent(f.name),
+      {method:"POST", headers:{"Content-Type":"application/json"}, body: f});
+    msg.textContent = d.error ? d.error :
+      "Sent. It's now in " + d.path + " — load it from Touch'N'Stars.";
+  } catch (e) {
+    msg.textContent = "Upload failed: " + e.message;
+  } finally {
+    g("uploadbtn").disabled = false;
   }
 }
 
@@ -275,6 +310,70 @@ def build_app(token: Optional[str]):
     def settings(request: Request):
         check(request)
         return JSONResponse(load_settings())
+
+    @app.post("/api/settings")
+    async def put_settings(request: Request):
+        check(request)
+        data = await request.json()
+        if isinstance(data, dict):
+            save_settings(data)
+        return {"ok": True}
+
+    @app.post("/api/upload_sequence")
+    async def upload_sequence(name: str, request: Request):
+        """
+        Write an uploaded N.I.N.A. sequence into the capture PC's sequence
+        folder, reached over its network share.
+
+        Touch'N'Stars only lists sequences from that folder, and the phone
+        cannot write there directly. The processing computer can, since it
+        already reads frames from the capture PC for syncing.
+
+        The upload is checked before anything is written: it must be valid
+        JSON, look like a N.I.N.A. sequence, and be of a sane size. The
+        filename is reduced to a plain name so it cannot address anywhere
+        outside the configured folder.
+        """
+        check(request)
+        dest_dir = (load_settings().get("nina_dir") or "").strip()
+        if not dest_dir:
+            return {"error": "Set the N.I.N.A. sequence folder first."}
+
+        body = await request.body()
+        if len(body) > 5_000_000:
+            return {"error": "That file is too large to be a sequence."}
+        try:
+            seq = json.loads(body.decode("utf-8-sig"))
+        except Exception:                                # noqa: BLE001
+            return {"error": "That file isn't valid JSON."}
+        if "SequenceRootContainer" not in str(seq.get("$type", "")):
+            return {"error": "That JSON isn't a N.I.N.A. sequence (no "
+                             "SequenceRootContainer at the top)."}
+
+        import re as _re
+        base = Path(name).name                      # drop any path parts
+        base = _re.sub(r"[^A-Za-z0-9._ -]", "_", base).strip(" .")
+        if not base.lower().endswith(".json"):
+            base += ".json"
+        if not base or base == ".json":
+            base = "transit-sequence.json"
+
+        folder = Path(dest_dir)
+        try:
+            if not folder.exists():
+                return {"error": f"Can't reach {folder}. Check the share is "
+                                 f"available from this computer, and that "
+                                 f"it's shared with write access."}
+            target = folder / base
+            tmp = folder / (base + ".part")
+            tmp.write_bytes(body)
+            os.replace(tmp, target)
+        except PermissionError:
+            return {"error": f"No write permission on {folder}. Share it with "
+                             f"write access for this computer's account."}
+        except OSError as exc:
+            return {"error": f"Couldn't write to {folder}: {exc}"}
+        return {"ok": True, "path": str(target)}
 
     @app.get("/api/lookup")
     def lookup(name: str, request: Request):
