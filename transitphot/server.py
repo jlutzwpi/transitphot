@@ -18,14 +18,17 @@ home LAN and emphatically unsafe on a public network. A token is required
 unless you pass --no-token, and it is printed at startup.
 """
 
-from __future__ import annotations
-
 import asyncio
 import json
+import os
 import secrets
-import subprocess
 import sys
 from pathlib import Path
+from typing import Optional
+
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
+                               StreamingResponse)
 
 SETTINGS = Path.home() / ".transitphot_gui.json"
 
@@ -193,11 +196,7 @@ async function stop() { await fetch("api/stop", {method:"POST"});
 </script></body></html>"""
 
 
-def build_app(token: str | None):
-    from fastapi import FastAPI, HTTPException, Request
-    from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
-    from fastapi.responses import FileResponse
-
+def build_app(token: Optional[str]):
     app = FastAPI(title="transitphot serve")
     state = {"proc": None, "queue": None, "plot": None, "task": None}
 
@@ -309,7 +308,7 @@ def build_app(token: str | None):
         proc = await asyncio.create_subprocess_exec(
             *cmd, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
-            env={**__import__("os").environ, "PYTHONUNBUFFERED": "1",
+            env={**os.environ, "PYTHONUNBUFFERED": "1",
                  "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"},
         )
         state["proc"] = proc
