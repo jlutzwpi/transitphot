@@ -281,20 +281,40 @@ def build_app(token: Optional[str]):
         check(request)
         import urllib.parse
         import urllib.request as ur
-        adql = ("SELECT pl_name, ra, dec, sy_gaiamag, sy_vmag, pl_orbper, "
-                "pl_tranmid, pl_trandur, pl_trandep FROM pscomppars "
-                f"WHERE pl_name = '{name.replace(chr(39), chr(39) * 2)}'")
-        url = ("https://exoplanetarchive.ipac.caltech.edu/TAP/sync?query="
-               + urllib.parse.quote(adql) + "&format=json")
-        try:
-            req = ur.Request(url, headers={"User-Agent": "transitphot"})
-            with ur.urlopen(req, timeout=60) as r:
-                rows = json.load(r)
-        except Exception as exc:                         # noqa: BLE001
-            return {"error": f"Archive lookup failed: {exc}"}
+
+        # Archive names are case- and space-sensitive ("KELT-16 b"), and
+        # people rarely type them exactly. Try an exact match, then a
+        # case-insensitive one, then a prefix — the same fallbacks the
+        # desktop GUI uses.
+        safe = name.strip().replace("'", "''")
+        cols = ("pl_name, ra, dec, sy_gaiamag, sy_vmag, pl_orbper, "
+                "pl_tranmid, pl_trandur, pl_trandep")
+        queries = [
+            f"SELECT {cols} FROM pscomppars WHERE pl_name = '{safe}'",
+            f"SELECT {cols} FROM pscomppars "
+            f"WHERE UPPER(pl_name) = UPPER('{safe}')",
+            f"SELECT {cols} FROM pscomppars "
+            f"WHERE UPPER(pl_name) LIKE UPPER('{safe}%')",
+        ]
+        rows, last_err = None, None
+        for adql in queries:
+            url = ("https://exoplanetarchive.ipac.caltech.edu/TAP/sync?query="
+                   + urllib.parse.quote(adql) + "&format=json")
+            try:
+                req = ur.Request(url, headers={"User-Agent": "transitphot"})
+                with ur.urlopen(req, timeout=60) as r:
+                    rows = json.load(r)
+            except Exception as exc:                     # noqa: BLE001
+                last_err = exc
+                continue
+            if rows:
+                break
         if not rows:
-            return {"error": f"No archive entry for '{name}'. "
-                             f"Names look like 'TOI-3629 b'."}
+            if last_err is not None and rows is None:
+                return {"error": f"Archive lookup failed: {last_err}"}
+            return {"error": f"No archive entry for '{name}'. Names look like "
+                             f"'TOI-3629 b' or 'KELT-16 b' — a space before "
+                             f"the planet letter."}
         r0 = rows[0]
         f = {}
         if r0.get("ra") is not None:
@@ -313,8 +333,12 @@ def build_app(token: Optional[str]):
             f["epoch_bjd"] = repr(float(r0["pl_tranmid"]))
         if r0.get("pl_orbper") is not None:
             f["period"] = repr(float(r0["pl_orbper"]))
-        return {"fields": f, "note": f"Filled from the archive for "
-                                     f"{r0['pl_name']}."}
+        canonical = r0.get("pl_name") or name
+        f["target_name"] = canonical
+        note = f"Filled from the archive for {canonical}."
+        if canonical != name.strip():
+            note += f" (matched '{name.strip()}')"
+        return {"fields": f, "note": note}
 
     @app.post("/api/start")
     async def start(request: Request):
