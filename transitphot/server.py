@@ -95,16 +95,19 @@ PAGE = """<!DOCTYPE html>
   <input id="source" placeholder="\\\\MELE-PC\\n.i.n.a\\2026-09-16\\TARGET\\LIGHT">
   <label for="lights_root">Local folder for the lights</label>
   <input id="lights_root" placeholder="D:\\xfer\\TARGET">
+  <label for="bias">Bias</label><input id="bias">
   <div class="row">
     <div><label for="darks">Darks</label><input id="darks"></div>
     <div><label for="flats">Flats</label><input id="flats"></div>
   </div>
+  <div class="hint">Leave any calibration folder blank to skip it.</div>
 </fieldset>
 
 <fieldset><legend>Target</legend>
   <label for="target_name">Name</label>
   <input id="target_name" placeholder="TOI-3629 b">
-  <button type="button" onclick="lookup()">Look up in NASA archive</button>
+  <button type="button" id="lookupbtn" onclick="lookup()">Look up in NASA archive</button>
+  <div id="lookupmsg" class="hint"></div>
   <div class="row">
     <div><label for="ra">RA (deg)</label><input id="ra" inputmode="decimal"></div>
     <div><label for="dec">Dec (deg)</label><input id="dec" inputmode="decimal"></div>
@@ -121,6 +124,23 @@ PAGE = """<!DOCTYPE html>
   <label for="period">Period (days)</label><input id="period" inputmode="decimal">
 </fieldset>
 
+<fieldset><legend>Site and equipment</legend>
+  <div class="row">
+    <div><label for="lat">Latitude</label><input id="lat" inputmode="decimal"></div>
+    <div><label for="lon">Longitude (E+)</label><input id="lon" inputmode="decimal"></div>
+  </div>
+  <div class="row">
+    <div><label for="elevation">Elevation (m)</label><input id="elevation" inputmode="decimal"></div>
+    <div><label for="binning">Binning</label><input id="binning" placeholder="1x1"></div>
+  </div>
+  <div class="row">
+    <div><label for="aavso_obscode">AAVSO observer code</label><input id="aavso_obscode"></div>
+    <div><label for="aavso_filter">AAVSO filter</label><input id="aavso_filter" placeholder="auto"></div>
+  </div>
+  <div class="hint">Saved on the processing computer and shared with the
+    desktop app. Leave the AAVSO filter blank to derive it from the filter.</div>
+</fieldset>
+
 <fieldset><legend>Options</legend>
   <label for="after_idle">Start after the capture folder is idle (minutes)</label>
   <input id="after_idle" inputmode="numeric" value="15">
@@ -134,17 +154,39 @@ PAGE = """<!DOCTYPE html>
 <img id="plot" alt="Light curve">
 
 <script>
-const F = ["source","lights_root","darks","flats","target_name","ra","dec",
+const F = ["source","lights_root","bias","darks","flats","target_name","ra","dec",
            "target_mag","depth_ppm","duration_hours","filter_band","epoch_bjd",
-           "period","after_idle"];
+           "period","after_idle","lat","lon","elevation","binning",
+           "aavso_obscode","aavso_filter"];
 const g = id => document.getElementById(id);
 const say = t => { const l = g("log"); l.textContent += t;
                    l.scrollTop = l.scrollHeight; };
 
+// Every API call must carry the token from the page URL — the server
+// rejects anything without it.
+const TOKEN = new URLSearchParams(location.search).get("t") || "";
+function withToken(path) {
+  if (!TOKEN) return path;
+  return path + (path.includes("?") ? "&" : "?") + "t=" + encodeURIComponent(TOKEN);
+}
+async function api(path, opts = {}) {
+  const r = await fetch(withToken(path), opts);
+  let body = null;
+  try { body = await r.json(); } catch (e) {}
+  if (!r.ok) {
+    const why = (body && (body.detail || body.error)) || r.statusText;
+    throw new Error(r.status + " " + why);
+  }
+  return body || {};
+}
+
 async function boot() {
-  const r = await fetch("api/settings");
-  const s = await r.json();
-  F.forEach(k => { if (s[k] != null && s[k] !== "") g(k).value = s[k]; });
+  try {
+    const s = await api("api/settings");
+    F.forEach(k => { if (s[k] != null && s[k] !== "") g(k).value = s[k]; });
+  } catch (e) {
+    g("status").textContent = "Could not load saved settings: " + e.message;
+  }
 }
 boot();
 
@@ -154,28 +196,39 @@ function values() {
 
 async function lookup() {
   const name = g("target_name").value.trim();
-  if (!name) return;
-  g("status").textContent = "Looking up " + name + "…";
+  const msg = g("lookupmsg");
+  if (!name) { msg.textContent = "Enter a target name first."; return; }
+  g("lookupbtn").disabled = true;
+  msg.textContent = "Looking up " + name + "… (the archive can be slow)";
   try {
-    const r = await fetch("api/lookup?name=" + encodeURIComponent(name));
-    const d = await r.json();
-    if (d.error) { g("status").textContent = d.error; return; }
-    for (const [k, v] of Object.entries(d.fields || {}))
-      if (g(k)) g(k).value = v;
-    g("status").textContent = d.note || "Filled from the archive.";
-  } catch (e) { g("status").textContent = "Lookup failed: " + e.message; }
+    const d = await api("api/lookup?name=" + encodeURIComponent(name));
+    if (d.error) { msg.textContent = d.error; return; }
+    const f = d.fields || {};
+    let n = 0;
+    for (const [k, v] of Object.entries(f)) if (g(k)) { g(k).value = v; n++; }
+    msg.textContent = n ? (d.note || "Filled " + n + " fields.")
+                        : "The archive returned no usable values.";
+  } catch (e) {
+    msg.textContent = "Lookup failed: " + e.message;
+  } finally {
+    g("lookupbtn").disabled = false;
+  }
 }
 
 let es = null;
 async function start() {
   g("log").textContent = ""; g("plot").style.display = "none";
   g("start").disabled = true; g("stop").disabled = false;
-  g("status").textContent = "Running…";
-  const r = await fetch("api/start", {method:"POST",
-    headers:{"Content-Type":"application/json"}, body:JSON.stringify(values())});
-  const d = await r.json();
+  g("status").textContent = "Starting…";
+  let d;
+  try {
+    d = await api("api/start", {method:"POST",
+      headers:{"Content-Type":"application/json"}, body:JSON.stringify(values())});
+  } catch (e) { g("status").textContent = "Could not start: " + e.message;
+                done(); return; }
   if (d.error) { g("status").textContent = d.error; done(); return; }
-  es = new EventSource("api/stream");
+  g("status").textContent = "Running…";
+  es = new EventSource(withToken("api/stream"));
   es.onmessage = ev => {
     const m = JSON.parse(ev.data);
     if (m.line != null) say(m.line);
@@ -183,7 +236,8 @@ async function start() {
       g("status").textContent = m.code === 0 ? "Finished." :
                                 "Exited with code " + m.code;
       if (m.plot) { const i = g("plot");
-        i.src = "api/plot?t=" + Date.now(); i.style.display = "block"; }
+        i.src = withToken("api/plot") + "&n=" + Date.now();
+        i.style.display = "block"; }
       done();
     }
   };
@@ -191,8 +245,10 @@ async function start() {
 }
 function done() { if (es) { es.close(); es = null; }
   g("start").disabled = false; g("stop").disabled = true; }
-async function stop() { await fetch("api/stop", {method:"POST"});
-  g("status").textContent = "Stopping…"; }
+async function stop() {
+  try { await api("api/stop", {method:"POST"}); } catch (e) {}
+  g("status").textContent = "Stopping…";
+}
 </script></body></html>"""
 
 
@@ -282,7 +338,8 @@ def build_app(token: Optional[str]):
                "--target-name", name,
                "--out", f"{stem}.csv", "--plot", f"{stem}.png",
                "--fit", "--fix-duration", "--model", "both"]
-        for key, flag in (("source", "--source"), ("darks", "--darks"),
+        for key, flag in (("source", "--source"), ("bias", "--bias"),
+                          ("darks", "--darks"),
                           ("flats", "--flats"),
                           ("filter_band", "--filter"),
                           ("depth_ppm", "--depth-ppm"),
@@ -291,14 +348,17 @@ def build_app(token: Optional[str]):
                           ("after_idle", "--after-idle")):
             if v.get(key):
                 cmd += [flag, v[key]]
+        # Site values come from the page (already saved above), falling back
+        # to the settings file so a partly filled page still works.
         s = load_settings()
         for key, flag in (("lat", "--lat"), ("lon", "--lon"),
                           ("elevation", "--elevation"),
                           ("aavso_obscode", "--aavso-obscode"),
                           ("aavso_filter", "--aavso-filter"),
                           ("binning", "--binning")):
-            if s.get(key):
-                cmd += [flag, str(s[key])]
+            val = v.get(key) or s.get(key)
+            if val:
+                cmd += [flag, str(val)]
 
         state["plot"] = Path.cwd() / name / f"{stem}.png"
         state["queue"] = asyncio.Queue()
