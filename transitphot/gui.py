@@ -332,6 +332,7 @@ class App(tk.Tk):
         rather than just reporting the exception. Runs on a worker thread so
         the window stays responsive.
         """
+        import time as _time
         import urllib.error
         import urllib.parse
         import urllib.request
@@ -360,19 +361,30 @@ class App(tk.Tk):
         rows = None
         last_err = None
         for attempt, adql in enumerate(queries, 1):
-            url = ("https://exoplanetarchive.ipac.caltech.edu/TAP/sync?query="
-                   + urllib.parse.quote(adql) + "&format=json")
-            try:
-                req = urllib.request.Request(
-                    url, headers={"User-Agent": "transitphot"})
-                with urllib.request.urlopen(req, timeout=90) as r:
-                    rows = json.load(r)
-            except Exception as exc:                    # noqa: BLE001
-                last_err = exc
-                self.q.put(f"  attempt {attempt} failed ({exc})\n")
-                continue
+            # Each name form gets a couple of tries with a pause. The archive
+            # sometimes puts a Cloudflare challenge in front of its API, which
+            # answers any non-browser client with 403 — transient, but it will
+            # fail a whole run otherwise.
+            for delay in (0, 5, 15):
+                if delay:
+                    _time.sleep(delay)
+                try:
+                    rows = fetch(adql)
+                    last_err = None
+                    break
+                except Exception as exc:                # noqa: BLE001
+                    last_err = exc
+                    code = getattr(exc, "code", None)
+                    if code == 403:
+                        self.q.put("  archive returned 403 (it sometimes puts "
+                                   "a browser challenge in front of the API); "
+                                   "retrying\n")
+                    elif delay:
+                        self.q.put(f"  retry failed ({exc})\n")
             if rows:
                 break
+            if last_err is not None:
+                self.q.put(f"  attempt {attempt} failed ({last_err})\n")
 
         if not rows:
             if last_err is not None:

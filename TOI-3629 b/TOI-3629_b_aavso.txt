@@ -1,6 +1,6 @@
 #TYPE=EXOPLANET
 #OBSCODE=JLFA
-#SOFTWARE=transitphot
+#SOFTWARE=Private software transitphot
 #DELIM=,
 #DATE_TYPE=BJD_TDB
 #OBSTYPE=CCD
@@ -10,13 +10,13 @@
 #EPOCH=J2000
 #EXOPLANET_NAME=TOI-3629 b
 #BINNING=1x1
-#EXPOSURE_TIME=0
-#FILTER=O
+#EXPOSURE_TIME=120
+#FILTER=N/A
 #DETREND_PARAMETERS=Airmass
 #MEASUREMENT_TYPE=Rnflux
-#PRIORS=period 3.936551 d; duration 2.2 h fixed; depth prior 15461.0 ppm; quadratic limb darkening u1=0.35 u2=0.25
+#PRIORS=period 3.9365578 d; duration 2.2 h fixed; depth prior 15461.0 ppm; quadratic limb darkening u1=0.35 u2=0.25
 #RESULTS=Tc=2461299.71577 BJD_TDB +/-0.7 min; depth=15141+/-692 ppm; duration=2.20 h; residual RMS=3930 ppm
-#NOTES=122 points. Aperture 11.7 px, sky annulus 24.5-42.0 px, 4 comparison stars. Reduced with transitphot (CMOS sensor reported as CCD per format).
+#NOTES=122 points. Luminance filter used. Aperture 11.7 px, sky annulus 24.5-42.0 px, 4 comparison stars. Reduced with home-grown sw transitphot. ASI2600mm camera used with L filter. 15 min clouds after meridian flip.
 # DATE DIFF MERR DETREND_1 DETREND_2 DETREND_3 DETREND_4
 2461299.62391447,1.009076,0.001791,1.106458,n/a,n/a,n/a
 2461299.62530855,1.009009,0.001794,1.103104,n/a,n/a,n/a

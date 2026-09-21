@@ -84,6 +84,14 @@ def cmd_run(args):
         except Exception:                            # noqa: BLE001
             return None
 
+    exposure_s = args.exposure if args.exposure else ph.session_exposure(paths)
+    if exposure_s:
+        print(f"Exposure {exposure_s:g}s per frame")
+    else:
+        print("WARNING: could not determine the exposure time from the FITS "
+              "headers or filenames. Pass --exposure if you need it in the "
+              "AAVSO report.")
+
     fwhm = args.fwhm if args.fwhm else ph.session_fwhm(paths, _target_xy,
                                                       report=True)
     if not args.fwhm and not (1.5 <= fwhm <= 12.0):
@@ -508,8 +516,7 @@ def cmd_run(args):
                     bjd, norm, err,
                     obscode=args.aavso_obscode,
                     star_name=star, exoplanet_name=planet,
-                    exposure_s=(args.exposure_s if hasattr(args, "exposure_s")
-                                else 0),
+                    exposure_s=exposure_s,
                     filter_code=filt, binning=args.binning,
                     ra=f"{args.ra:.6f}", dec=f"{args.dec:+.6f}",
                     priors=priors, results=results, notes=notes,
@@ -676,6 +683,9 @@ def main():
     r.add_argument("--aavso-filter", dest="aavso_filter",
                    help="AAVSO filter ShortName (e.g. R, V, CV for clear). "
                         "Defaults to --filter if it is a valid designation.")
+    r.add_argument("--exposure", type=float,
+                   help="exposure time in seconds; read from the FITS headers "
+                        "when omitted")
     r.add_argument("--binning", default="1x1",
                    help="camera binning as AAVSO expects it (1x1, 2x2...)")
     r.add_argument("--star-name", dest="star_name",

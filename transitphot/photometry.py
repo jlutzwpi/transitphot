@@ -420,3 +420,50 @@ def field_radius_arcmin(header, default: float = 20.0) -> float:
         return float(np.clip(0.5 * math.hypot(nx, ny) * scale, 2.0, 120.0))
     except Exception:                                # noqa: BLE001
         return default
+
+
+def session_exposure(paths, sample: int = 25) -> float:
+    """
+    Exposure time for the session, in seconds.
+
+    Read from the FITS headers rather than the filename: EXPTIME is written
+    by the camera driver, while a filename is a convention that differs
+    between capture programs and can be edited. Falls back to parsing the
+    filename only when no header carries it.
+
+    Returns the median across sampled frames, so one odd frame cannot skew
+    what gets reported.
+    """
+    vals = []
+    step = max(len(paths) // sample, 1)
+    for p in list(paths)[::step][:sample]:
+        try:
+            h = fits.getheader(p)
+        except Exception:                                # noqa: BLE001
+            continue
+        for key in ("EXPTIME", "EXPOSURE", "ITIME", "EXP_TIME"):
+            v = h.get(key)
+            if v is not None:
+                try:
+                    v = float(v)
+                except (TypeError, ValueError):
+                    continue
+                if v > 0:
+                    vals.append(v)
+                break
+    if vals:
+        return float(np.median(vals))
+
+    # Filename fallback: patterns like "_120.00s_" or "-60s-"
+    import re
+    for p in list(paths)[:sample]:
+        m = re.search(r"[_\-. ](\d+(?:\.\d+)?)\s*s(?:ec)?[_\-. ]",
+                      Path(p).name, re.I)
+        if m:
+            try:
+                v = float(m.group(1))
+                if 0 < v < 3600:
+                    return v
+            except ValueError:
+                pass
+    return 0.0
