@@ -3,6 +3,8 @@
 Local FITS-to-light-curve pipeline for exoplanet transit photometry.
 Companion to [TransitPlanner](https://transits.justinlutz.com).
 
+<img width="2880" height="588" alt="transitplanner-pipeline-wide (1)" src="https://github.com/user-attachments/assets/be210357-c87c-40b4-9324-8ce3396153de" />
+
 Your data stays on your machine — only the finished light curve is small
 enough to share, and only if you choose to.
 
