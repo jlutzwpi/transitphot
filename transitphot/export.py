@@ -28,7 +28,7 @@ AAVSO_FILTERS = {
 # How an imaging filter maps to an AAVSO ShortName. The distinction that
 # matters: R/B/V are the PHOTOMETRIC standards (Cousins, Johnson) with
 # defined bandpasses. A broadband LRGB imaging filter is not one of those,
-# so it reports as the tri-colour equivalent — claiming Cousins R implies a
+# so it reports as the tri-color equivalent — claiming Cousins R implies a
 # photometric calibration an LRGB set does not have. Luminance is a UV/IR
 # blocking filter, not "no filter", so it is O with a description.
 FILTER_MAP = {
@@ -125,7 +125,7 @@ def write_aavso(path, bjd_tdb, flux, flux_err, *, obscode: str,
     Notes on choices made here:
     * DATE_TYPE is BJD_TDB, which is what the pipeline produces and the most
       precise option the format accepts.
-    * MEASUREMENT_TYPE defaults to Rnflux — the curve is normalised relative
+    * MEASUREMENT_TYPE defaults to Rnflux — the curve is normalized relative
       flux, not a differential magnitude.
     * A CMOS camera is reported as OBSTYPE=CCD per the spec, with the actual
       sensor named in NOTES.

@@ -38,16 +38,49 @@ def run_night(args, *, cmd_sync, cmd_calibrate, cmd_check, cmd_solve, cmd_run):
     steps = 4 if args.source else 3
     n = 0
 
+    # ---- 0. wait for N.I.N.A. to finish, if it can tell us --------------
+    after_idle = args.after_idle
+    history_path = Path(args.lights_root) / "nina_image_history.json"
+    api = None
+    if getattr(args, "nina_api", None):
+        from .nina_api import NinaAPI, merge_history, wait_for_sequence_end
+        api = NinaAPI(args.nina_api)
+        ver = api.reachable()
+        if ver is None:
+            _say(f"N.I.N.A. API at {api.base} isn't answering; falling back "
+                 f"to waiting for the capture folder to go quiet.")
+            api = None
+        else:
+            _say(f"\nWatching the N.I.N.A. sequence (Advanced API {ver}) — "
+                 f"processing starts when it finishes.")
+            if args.start:
+                from .sync import wait_until_clock
+                wait_until_clock(args.start)
+            if wait_for_sequence_end(api, poll_s=60.0,
+                                     history_path=history_path, say=_say):
+                after_idle = None          # the API told us; no need to guess
+            else:
+                _say("Lost contact with N.I.N.A.; falling back to idle "
+                     "detection on the capture folder.")
+
     # ---- 1. sync from the capture device -------------------------------
     if args.source:
         n += 1
         _step(n, steps, "Copy frames from the capture device")
         sync_args = argparse.Namespace(
             source=args.source, dest=args.lights_root,
-            start=args.start, after_idle=args.after_idle,
+            start=None if api else args.start, after_idle=after_idle,
             poll=args.poll, throttle=0.5, settle=5.0, dry_run=False,
         )
         cmd_sync(sync_args)
+
+    # final snapshot of the image history, now the run is over
+    if api is not None:
+        try:
+            k = merge_history(history_path, api.image_history())
+            _say(f"Saved N.I.N.A. image history for {k} frame(s)")
+        except Exception as exc:                        # noqa: BLE001
+            _say(f"Couldn't save the image history ({exc})")
 
     lights = Path(args.lights_root)
     if not any(lights.rglob("*.fit*")):

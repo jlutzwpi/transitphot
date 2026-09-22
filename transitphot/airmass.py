@@ -9,9 +9,9 @@ airmass, which depends on where the target actually was.
 
 Fitting an explicit airmass term is what AstroImageJ does with its "detrend
 vectors", and it matters for more than tidiness: when the baseline is not
-modelled properly, the transit parameters absorb it. The trapezoid tilts its
+modeled properly, the transit parameters absorb it. The trapezoid tilts its
 continuum and reads the depth shallow; the limb-darkened model holds its
-continuum flat and reads it deep. On TrES-3 b those two behaviours produced
+continuum flat and reads it deep. On TrES-3 b those two behaviors produced
 depths of 14,524 and 23,246 ppm from the same frames, and mid-times five
 minutes apart.
 
@@ -19,8 +19,8 @@ The physical model is Beer-Lambert: observed flux is attenuated by
 exp(-k * X), where X is airmass and k the extinction coefficient in the
 observing band. Differential photometry removes most of this — the
 comparison stars are dimmed too — but only exactly so if target and
-comparisons have identical colours. They never do, so a residual
-colour-dependent term survives, and that is what we fit.
+comparisons have identical colors. They never do, so a residual
+color-dependent term survives, and that is what we fit.
 """
 
 from __future__ import annotations
@@ -51,9 +51,9 @@ def airmass_series(jd_utc, ra_deg: float, dec_deg: float,
 
 def detrend_factor(airmass: np.ndarray, k: float) -> np.ndarray:
     """
-    Multiplicative extinction term, normalised to the median airmass.
+    Multiplicative extinction term, normalized to the median airmass.
 
-    Normalising means k is the only free parameter and the term equals 1 at
+    Normalizing means k is the only free parameter and the term equals 1 at
     the middle of the session, so it cannot trade against the overall
     baseline level.
     """

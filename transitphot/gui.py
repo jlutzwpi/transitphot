@@ -226,7 +226,7 @@ class App(tk.Tk):
                             variable=self.model).pack(side="left", padx=(0, 14))
         ttk.Label(f3, foreground="#555", justify="left",
                   text="The trapezoid is robust but reads depths about 10-15% "
-                       "low — its flat bottom sits above\nthe true centre of a "
+                       "low — its flat bottom sits above\nthe true center of a "
                        "limb-darkened profile. The limb-darkened model gets "
                        "depth right;\n\"Both\" fits the same data twice so you "
                        "can compare. Needs a period to be set."
@@ -408,7 +408,7 @@ class App(tk.Tk):
         # coarser values, and what matters is which one predicts TONIGHT
         # most precisely. Uncertainty in a predicted mid-time grows as
         # sqrt(dTc^2 + (n*dP)^2), so a small period error beats a recent
-        # date. Pick the ephemeris that minimises that.
+        # date. Pick the ephemeris that minimizes that.
         import math
         import time as _time
 

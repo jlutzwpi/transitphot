@@ -2,13 +2,13 @@
 Limb-darkened transit fitting.
 
 The trapezoid model in fitting.py is robust and fast, but a real transit is
-not trapezoidal: the stellar disc is brighter at its centre than its limb, so
+not trapezoidal: the stellar disc is brighter at its center than its limb, so
 the light curve has curved shoulders and a rounded floor. Two consequences
 measured on real data:
 
 * **Depth comes out shallow.** A trapezoid's flat bottom sits above the true
-  centre depth of a limb-darkened profile. Across four targets this ran
-  10-15% low against catalogue values, while AstroImageJ's limb-darkened fit
+  center depth of a limb-darkened profile. Across four targets this ran
+  10-15% low against catalog values, while AstroImageJ's limb-darkened fit
   recovered them.
 * **Ingress shape is wrong**, which can pull the mid-time when the baseline
   is short or asymmetric.
@@ -39,7 +39,7 @@ class LimbDarkFit:
     rp_rs_err: float
     a_rs: float                  # semi-major axis in stellar radii
     inclination_deg: float
-    depth_ppm: float             # (Rp/Rs)^2 — the catalogue convention
+    depth_ppm: float             # (Rp/Rs)^2 — the catalog convention
     depth_err_ppm: float
     central_depth_ppm: float     # the observed dip at mid-transit
     duration_hours: float
@@ -132,7 +132,7 @@ def fit(bjd, flux, flux_err=None, *, period: float,
     # Bounds: the quadratic baseline is deliberately tight. Over a few-hour
     # window a loose curvature term can imitate a broad shallow transit, and
     # the fit will happily shrink the planet to nothing to let it. Rp/Rs is
-    # also held near the catalogue value for the same reason — a single
+    # also held near the catalog value for the same reason — a single
     # ground-based transit does not redetermine planet size.
     lo = [bjd.min(), rp0 * 0.5, 1.5, 60.0, 0.95, -2.0, -3.0]
     hi = [bjd.max(), rp0 * 1.6, 60.0, 90.0, 1.05, 2.0, 3.0]
@@ -169,8 +169,8 @@ def fit(bjd, flux, flux_err=None, *, period: float,
     depth = rp ** 2
     depth_err = 2 * rp * perr[1]
     # Two different numbers get called "depth". (Rp/Rs)^2 is the geometric
-    # ratio catalogues list; the observed dip at mid-transit is deeper,
-    # because the planet covers the bright centre of a limb-darkened disc.
+    # ratio catalogs list; the observed dip at mid-transit is deeper,
+    # because the planet covers the bright center of a limb-darkened disc.
     # AstroImageJ quotes the latter, so report both to avoid comparing
     # incompatible quantities.
     central = 1.0 - float(_occulted_flux([0.0], rp, u1, u2)[0])
@@ -210,7 +210,7 @@ def _occulted_flux(z: np.ndarray, p: float, u1: float, u2: float,
     and needs nothing beyond numpy.
     """
     z = np.atleast_1d(np.asarray(z, dtype=float))
-    r = (np.arange(n_ann) + 0.5) / n_ann          # annulus centres, 0..1
+    r = (np.arange(n_ann) + 0.5) / n_ann          # annulus centers, 0..1
     dr = 1.0 / n_ann
     mu = np.sqrt(np.clip(1.0 - r ** 2, 0.0, 1.0))
     intensity = 1.0 - u1 * (1.0 - mu) - u2 * (1.0 - mu) ** 2
@@ -231,9 +231,9 @@ def _occulted_flux(z: np.ndarray, p: float, u1: float, u2: float,
     partial = ~no_overlap & ~inside & (Z > 0)
     frac = np.where(partial, np.arccos(cosang) / np.pi, frac)
     frac = np.where(inside, 1.0, frac)
-    # planet exactly centred: annuli inside p are fully covered
-    centred = (Z == 0) & (R <= p)
-    frac = np.where(centred, 1.0, frac)
+    # planet exactly centered: annuli inside p are fully covered
+    centered = (Z == 0) & (R <= p)
+    frac = np.where(centered, 1.0, frac)
 
     blocked = np.sum(frac * intensity * 2.0 * np.pi * R * dr, axis=1)
     return 1.0 - blocked / total

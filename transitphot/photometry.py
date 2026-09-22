@@ -48,7 +48,7 @@ def measure_fwhm(data: np.ndarray, xy: tuple[float, float],
     if not np.isfinite(peak) or std <= 0 or peak < 5 * std:
         return float("nan")                      # nothing bright enough here
 
-    # Count only pixels near the centre, so a neighbouring star in the corner
+    # Count only pixels near the center, so a neighboring star in the corner
     # of the cutout can't inflate the area.
     py, px = np.unravel_index(int(np.nanargmax(sub)), sub.shape)
     yy, xx = np.mgrid[0:sub.shape[0], 0:sub.shape[1]]
@@ -107,7 +107,7 @@ def iter_frames(paths: list[Path]):
     Deliberately NO image registration: every frame is plate-solved, so
     aperture positions are computed from that frame's own WCS. This is
     better than aligning — resampling pixels to a common grid interpolates
-    flux between neighbours, which is exactly the quantity we are trying to
+    flux between neighbors, which is exactly the quantity we are trying to
     measure. Photometry belongs on original pixels.
     """
     for p in paths:
@@ -197,7 +197,7 @@ def measure(data: np.ndarray, positions: list[tuple[float, float]],
 
     r_ap may be a single radius or a sequence of radii. Measuring several
     radii in one pass costs almost nothing (the background annulus is shared)
-    and lets the pipeline choose the aperture that actually minimises scatter
+    and lets the pipeline choose the aperture that actually minimizes scatter
     rather than guessing a multiple of FWHM.
 
     Returns background-subtracted flux, shaped (n_radii, n_positions) when

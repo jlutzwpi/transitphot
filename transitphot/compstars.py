@@ -12,7 +12,7 @@ Selection criteria, in the order they matter:
 2. **Color** — similar BP-RP to the target. Differential atmospheric
    extinction is color-dependent, so a red comparison against a blue target
    introduces a slow trend across the night that mimics (or hides) a transit.
-3. **Isolation** — no neighbour within the photometric aperture; blends
+3. **Isolation** — no neighbor within the photometric aperture; blends
    corrupt the flux.
 4. **Non-variability** — Gaia's variability flag plus a stability check
    against the actual frames.
@@ -61,6 +61,67 @@ def query_field(ra_deg: float, dec_deg: float, radius_arcmin: float = 20.0,
     return Gaia.launch_job_async(q).get_results()
 
 
+def query_vsx(ra_deg: float, dec_deg: float, radius_arcmin: float = 20.0):
+    """
+    Known variable stars in the field, from AAVSO's VSX via VizieR.
+
+    Gaia's phot_variable_flag is sparse: it reads VARIABLE only for sources
+    Gaia's own variability pipeline classified, and NOT_AVAILABLE — "not
+    assessed", not "constant" — for almost everything else. VSX aggregates
+    ASAS-SN, ZTF, Kepler, TESS and decades of other surveys, so it catches
+    far more of the variables that would otherwise pass as comparisons.
+
+    Returns (SkyCoord, names, types), or None if VizieR can't be reached —
+    in which case the caller carries on with Gaia's flag alone.
+    """
+    try:
+        from astroquery.vizier import Vizier
+        v = Vizier(columns=["Name", "Type", "RAJ2000", "DEJ2000"],
+                   row_limit=-1, timeout=60)
+        res = v.query_region(SkyCoord(ra_deg * u.deg, dec_deg * u.deg),
+                             radius=radius_arcmin * u.arcmin,
+                             catalog="B/vsx/vsx")
+    except Exception:                                    # noqa: BLE001
+        return None
+    if not res or len(res[0]) == 0:
+        return SkyCoord([], [], unit="deg"), [], []
+    t = res[0]
+    try:
+        coords = SkyCoord(t["RAJ2000"], t["DEJ2000"], unit=(u.deg, u.deg))
+    except Exception:                                    # noqa: BLE001
+        coords = SkyCoord(t["RAJ2000"], t["DEJ2000"],
+                          unit=(u.hourangle, u.deg))
+    names = [str(x) for x in t["Name"]]
+    types = [str(x) for x in t["Type"]] if "Type" in t.colnames else [""] * len(t)
+    return coords, names, types
+
+
+def target_color_from(sources: Table, ra_deg: float, dec_deg: float,
+                      max_sep_arcsec: float = 3.0) -> float | None:
+    """
+    The target's own BP-RP color, taken from the same Gaia query.
+
+    Color matching needs the target's color to compare against. Without it
+    the check silently does nothing, which is exactly what happened: the
+    selection accepted a target_color but was never given one.
+    """
+    if len(sources) == 0:
+        return None
+    tgt = SkyCoord(ra_deg * u.deg, dec_deg * u.deg)
+    coords = SkyCoord(sources["ra"], sources["dec"], unit="deg")
+    sep = tgt.separation(coords).arcsec
+    i = int(np.argmin(sep))
+    if sep[i] > max_sep_arcsec:
+        return None
+    c = sources["bp_rp"][i]
+    if c is np.ma.masked or c is None:
+        return None
+    try:
+        return float(c)
+    except (TypeError, ValueError):
+        return None
+
+
 def color_tolerance_for(filter_band: str | None) -> float:
     """
     How closely a comparison star's color must match the target.
@@ -91,7 +152,10 @@ def select(target_ra: float, target_dec: float, target_mag: float,
            color_tolerance: float | None = None,
            min_separation_arcsec: float = 15.0,
            target_color: float | None = None,
-           filter_band: str | None = None) -> list[CompCandidate]:
+           filter_band: str | None = None,
+           variables=None,
+           rejected: list | None = None,
+           vsx_match_arcsec: float = 5.0) -> list[CompCandidate]:
     """
     Rank field stars as comparison candidates. Returns the best `n`.
 
@@ -105,6 +169,15 @@ def select(target_ra: float, target_dec: float, target_mag: float,
     tgt = SkyCoord(target_ra * u.deg, target_dec * u.deg)
     coords = SkyCoord(sources["ra"], sources["dec"], unit="deg")
     seps = tgt.separation(coords).arcmin
+
+    # Known variables from VSX: index each Gaia source to its nearest entry.
+    vsx_hit = [None] * len(sources)
+    if variables is not None and len(variables[0]) > 0:
+        vcoords, vnames, vtypes = variables
+        vi, vsep, _ = coords.match_to_catalog_sky(vcoords)
+        for i in range(len(sources)):
+            if vsep[i].arcsec <= vsx_match_arcsec:
+                vsx_hit[i] = (vnames[vi[i]], vtypes[vi[i]])
 
     # Pairwise separations, for isolation testing
     idx, sep2d, _ = coords.match_to_catalog_sky(coords, nthneighbor=2)
@@ -122,8 +195,17 @@ def select(target_ra: float, target_dec: float, target_mag: float,
         if dmag > mag_tolerance:
             continue
         if nearest_arcsec[i] < min_separation_arcsec:
-            continue                          # blended with a neighbour
+            continue                          # blended with a neighbor
         if str(row["phot_variable_flag"]).upper().startswith("VARIABLE"):
+            if rejected is not None:
+                rejected.append((mag, sep, "flagged variable by Gaia"))
+            continue
+        if vsx_hit[i] is not None:
+            if rejected is not None:
+                name, vtype = vsx_hit[i]
+                rejected.append((mag, sep, f"known variable {name}"
+                                 + (f" ({vtype})" if vtype else "")
+                                 + " in VSX"))
             continue
 
         reasons = []

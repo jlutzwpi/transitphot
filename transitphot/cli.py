@@ -61,6 +61,27 @@ def cmd_run(args):
               f"(e.g. {strays[0].name})")
     print(f"{len(paths)} frames")
 
+    # Focus and guiding problems from N.I.N.A.'s own per-frame records,
+    # saved by `night --nina-api`. Catches failure modes that comparison-star
+    # flux does not: a guiding glitch or focus drift leaves the ensemble
+    # ratio looking plausible while smearing the target out of the aperture.
+    if not getattr(args, "no_quality_filter", False):
+        from .nina_api import load_history, quality_flags
+        lights_dir = Path(args.lights)
+        history = load_history(lights_dir, lights_dir.parent)
+        if history:
+            flags = quality_flags(paths, history)
+            matched = sum(1 for p in paths
+                          if any(stem in p.stem for stem in history))
+            print(f"N.I.N.A. image history covers {matched}/{len(paths)} frames")
+            if flags:
+                print(f"Dropping {len(flags)} frame(s) on focus or guiding:")
+                for p, why in list(flags.items())[:8]:
+                    print(f"  {p.name}: {why}")
+                if len(flags) > 8:
+                    print(f"  … and {len(flags) - 8} more")
+                paths = [p for p in paths if p not in flags]
+
     hdr0 = fits.getheader(paths[0])
     # Comparison stars: query the field, rank, then verify against the data
     print("Querying field for comparison stars…")
@@ -70,8 +91,29 @@ def cmd_run(args):
         radius = ph.field_radius_arcmin(_fits.getheader(paths[0]))
         print(f"Comparison search radius {radius:.1f}' (from the frame's WCS)")
     field = cs.query_field(args.ra, args.dec, radius_arcmin=radius)
+
+    tcol = cs.target_color_from(field, args.ra, args.dec)
+    if tcol is not None:
+        print(f"Target color BP-RP {tcol:.2f} (Gaia) — matching comparisons to it")
+    else:
+        print("Target color unavailable from Gaia; comparisons matched on "
+              "magnitude only")
+
+    variables = cs.query_vsx(args.ra, args.dec, radius)
+    if variables is None:
+        print("VSX unreachable — screening variables with Gaia's flag only")
+    else:
+        print(f"VSX lists {len(variables[1])} known variable(s) in the field")
+
+    rejected: list = []
     comps = cs.select(args.ra, args.dec, args.target_mag, field,
-                      n=args.n_comps, filter_band=args.filter_band)
+                      n=args.n_comps, filter_band=args.filter_band,
+                      target_color=tcol, variables=variables,
+                      rejected=rejected)
+    if rejected:
+        print(f"Rejected {len(rejected)} candidate(s) as variable:")
+        for mag, sep, why in sorted(rejected, key=lambda r: r[1])[:8]:
+            print(f"  G={mag:.2f}  {sep:.1f}' away  — {why}")
     if not comps:
         raise SystemExit("No suitable comparison stars found — widen --radius "
                          "or relax the magnitude tolerance.")
@@ -208,7 +250,7 @@ def cmd_run(args):
     tflux = np.array(tflux)                          # (n_frames, n_radii)
     cflux = np.array(cflux)                          # (n_frames, n_radii, n_comps)
 
-    # Pick the aperture that minimises median comparison-star scatter. The
+    # Pick the aperture that minimizes median comparison-star scatter. The
     # comparisons are (presumed) constant stars, so whichever aperture makes
     # them most stable is the one measuring flux best — and choosing on the
     # comparisons rather than the target avoids biasing the transit itself.
@@ -344,8 +386,8 @@ def cmd_run(args):
     # Predicted mid-time from the archive ephemeris, for whichever transit
     # this session actually covers.
     if args.epoch_bjd and args.period_days and not args.predicted_mid:
-        centre = float(np.median(times))
-        n = round((centre - args.epoch_bjd) / args.period_days)
+        center = float(np.median(times))
+        n = round((center - args.epoch_bjd) / args.period_days)
         args.predicted_mid = args.epoch_bjd + n * args.period_days
         args.pred_system = "bjd_tdb"
         print(f"Predicted mid-transit from ephemeris (epoch + {n} x period): "
@@ -397,7 +439,7 @@ def cmd_run(args):
             if res.baseline_model == "airmass":
                 print(f"  baseline     airmass model, k = "
                       f"{res.k_extinction:+.4f} mag/airmass "
-                      f"(residual colour mismatch with the comparisons)")
+                      f"(residual color mismatch with the comparisons)")
             else:
                 print("  baseline     polynomial (the airmass model did not "
                       "improve the fit on this night)")
@@ -702,6 +744,10 @@ def main():
     r.add_argument("--aavso-filter", dest="aavso_filter",
                    help="AAVSO filter ShortName (e.g. R, V, CV for clear). "
                         "Defaults to --filter if it is a valid designation.")
+    r.add_argument("--no-quality-filter", action="store_true",
+                   dest="no_quality_filter",
+                   help="keep frames that N.I.N.A.'s history marks as badly "
+                        "focused or guided")
     r.add_argument("--exposure", type=float,
                    help="exposure time in seconds; read from the FITS headers "
                         "when omitted")
@@ -778,6 +824,11 @@ def main():
                      help="start once the source has been unchanged this many "
                           "minutes (default 15)")
     ngt.add_argument("--poll", type=float, default=30.0)
+    ngt.add_argument("--nina-api", dest="nina_api",
+                     help="N.I.N.A. Advanced API address, e.g. "
+                          "http://192.168.86.246:1888 — wait for the sequence "
+                          "to finish instead of watching for an idle folder, "
+                          "and record per-frame focus and guiding")
     ngt.add_argument("--fov", type=float, help="field height in degrees, "
                                                "speeds plate solving")
     ngt.add_argument("--no-solve", action="store_true", dest="no_solve",

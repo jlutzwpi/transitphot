@@ -123,7 +123,7 @@ def fit(bjd: np.ndarray, flux: np.ndarray, flux_err: np.ndarray | None = None,
 
     # With an airmass series available, fit a differential extinction
     # coefficient instead of leaning on the time polynomial. Typical residual
-    # k for well colour-matched comparisons is a few hundredths of a
+    # k for well color-matched comparisons is a few hundredths of a
     # magnitude per airmass; the bounds are generous but not unbounded.
     # Airmass and the quadratic time term are degenerate over a short
     # session — airmass IS very nearly quadratic in time around culmination —
@@ -136,7 +136,7 @@ def fit(bjd: np.ndarray, flux: np.ndarray, flux_err: np.ndarray | None = None,
     # extinction, the airmass term explains it with one parameter; if it is
     # something else (focus drift, flat-field structure as the field moves),
     # only the polynomial can follow it. Fit both and keep whichever the data
-    # prefers — decided below by BIC, which penalises the extra parameter.
+    # prefers — decided below by BIC, which penalizes the extra parameter.
     air_full = (np.asarray(airmass, dtype=float)[good]
                 if airmass is not None else None)
     air = None

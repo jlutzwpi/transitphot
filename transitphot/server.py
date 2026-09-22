@@ -91,14 +91,19 @@ PAGE = """<!DOCTYPE html>
 <p class="sub">Runs on __HOST__ — the frames stay there.</p>
 
 <fieldset><legend>Send a sequence to N.I.N.A.</legend>
-  <label for="nina_dir">N.I.N.A. sequence folder on the capture PC</label>
-  <input id="nina_dir" placeholder="\\\\MELE-PC\\N.I.N.A">
-  <div class="hint">A shared folder this computer can write to — the folder
-    Touch'N'Stars lists sequences from.</div>
   <label for="seqfile">Sequence exported from TransitPlanner</label>
   <input id="seqfile" type="file" accept=".json,application/json">
-  <button type="button" id="uploadbtn" onclick="uploadSeq()">Send to capture PC</button>
+  <button type="button" id="uploadbtn" onclick="uploadSeq()">Send to N.I.N.A.</button>
   <div id="uploadmsg" class="hint"></div>
+
+  <button type="button" id="startseqbtn" onclick="startSeq()">Start the sequence</button>
+  <div id="seqmsg" class="hint">Moves the mount. N.I.N.A. checks the equipment
+    first; load a sequence before starting one.</div>
+
+  <label for="nina_dir">Also save a copy here (optional)</label>
+  <input id="nina_dir" placeholder="\\\\MELE-PC\\N.I.N.A">
+  <div class="hint">A shared folder this computer can write to. Only needed if
+    you want the file to appear in Touch'N'Stars' list as well.</div>
 </fieldset>
 
 <fieldset><legend>Folders</legend>
@@ -144,6 +149,10 @@ PAGE = """<!DOCTYPE html>
     <div><label for="elevation">Elevation (m)</label><input id="elevation" inputmode="decimal"></div>
     <div><label for="binning">Binning</label><input id="binning" placeholder="1x1"></div>
   </div>
+  <label for="nina_api">N.I.N.A. address (Advanced API)</label>
+  <input id="nina_api" placeholder="http://192.168.86.246:1888">
+  <div class="hint">When set, processing starts the moment the sequence
+    finishes, and frames with poor focus or guiding are dropped.</div>
   <div class="row">
     <div><label for="aavso_obscode">AAVSO observer code</label><input id="aavso_obscode"></div>
     <div><label for="aavso_filter">AAVSO filter</label><input id="aavso_filter" placeholder="auto"></div>
@@ -168,7 +177,7 @@ PAGE = """<!DOCTYPE html>
 const F = ["source","lights_root","bias","darks","flats","target_name","ra","dec",
            "target_mag","depth_ppm","duration_hours","filter_band","epoch_bjd",
            "period","after_idle","lat","lon","elevation","binning",
-           "aavso_obscode","aavso_filter","nina_dir"];
+           "aavso_obscode","aavso_filter","nina_dir","nina_api"];
 const g = id => document.getElementById(id);
 const say = t => { const l = g("log"); l.textContent += t;
                    l.scrollTop = l.scrollHeight; };
@@ -229,24 +238,53 @@ async function lookup() {
 async function uploadSeq() {
   const msg = g("uploadmsg");
   const f = g("seqfile").files[0];
+  if (!f) { msg.textContent = "Choose the sequence file first."; return; }
   const dir = g("nina_dir").value.trim();
-  if (!dir) { msg.textContent = "Enter the N.I.N.A. sequence folder first."; return; }
-  if (!f)   { msg.textContent = "Choose the sequence file first."; return; }
+  const nina = g("nina_api").value.trim();
+  if (!dir && !nina) {
+    msg.textContent = "Set the N.I.N.A. address (below) or a folder to copy to.";
+    return;
+  }
   g("uploadbtn").disabled = true;
   msg.textContent = "Sending " + f.name + "…";
   try {
-    // Save the folder first so the server knows where to write.
     await api("api/settings", {method:"POST",
       headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({nina_dir: dir})});
-    const d = await api("api/upload_sequence?name=" + encodeURIComponent(f.name),
+      body: JSON.stringify({nina_dir: dir, nina_api: nina})});
+    const d = await api("api/send_sequence?name=" + encodeURIComponent(f.name),
       {method:"POST", headers:{"Content-Type":"application/json"}, body: f});
-    msg.textContent = d.error ? d.error :
-      "Sent. It's now in " + d.path + " — load it from Touch'N'Stars.";
+    msg.textContent = d.error ? d.error : (d.note || "Sent.");
   } catch (e) {
-    msg.textContent = "Upload failed: " + e.message;
+    msg.textContent = "Send failed: " + e.message;
   } finally {
     g("uploadbtn").disabled = false;
+  }
+}
+
+async function startSeq() {
+  const msg = g("seqmsg");
+  let what = "the loaded sequence";
+  try {
+    const st = await api("api/nina_state");
+    if (st.error) { msg.textContent = st.error; return; }
+    if (st.target) what = st.target;
+    if (st.status === "RUNNING") {
+      msg.textContent = "A sequence is already running (" + what + ").";
+      return;
+    }
+  } catch (e) { msg.textContent = "Can't reach N.I.N.A.: " + e.message; return; }
+
+  if (!confirm("Start " + what + " now?\n\nThis moves the mount and begins "
+               + "imaging.")) return;
+  g("startseqbtn").disabled = true;
+  msg.textContent = "Starting…";
+  try {
+    const d = await api("api/nina_start", {method:"POST"});
+    msg.textContent = d.error ? d.error : (d.note || "Sequence started.");
+  } catch (e) {
+    msg.textContent = "Could not start: " + e.message;
+  } finally {
+    g("startseqbtn").disabled = false;
   }
 }
 
@@ -365,8 +403,52 @@ home screen. The address stays the same between restarts.</p>
             save_settings(data)
         return {"ok": True}
 
-    @app.post("/api/upload_sequence")
-    async def upload_sequence(name: str, request: Request):
+    @app.get("/api/nina_state")
+    def nina_state(request: Request):
+        check(request)
+        base = (load_settings().get("nina_api") or "").strip()
+        if not base:
+            return {"error": "Set the N.I.N.A. address first."}
+        from .nina_api import NinaAPI
+        try:
+            api = NinaAPI(base)
+            status, current = api.targets_status()
+        except Exception as exc:                         # noqa: BLE001
+            return {"error": f"N.I.N.A. not answering: {exc}"}
+        # the target container is named for the target, so it is the most
+        # useful thing to show before starting a run
+        target = None
+        try:
+            for block in api.get("sequence/state") or []:
+                for item in (block or {}).get("Items") or []:
+                    name = (item.get("Name") if isinstance(item, dict)
+                            else str(item))
+                    if name and name.endswith("_Container") and \
+                            "Startup" not in name and "End" not in name and \
+                            "flats" not in name.lower():
+                        target = name.replace("_Container", "")
+                        break
+        except Exception:                                # noqa: BLE001
+            pass
+        return {"status": status, "target": target or current}
+
+    @app.post("/api/nina_start")
+    def nina_start(request: Request):
+        check(request)
+        base = (load_settings().get("nina_api") or "").strip()
+        if not base:
+            return {"error": "Set the N.I.N.A. address first."}
+        from .nina_api import NinaAPI, start
+        try:
+            # validation left on: it is what catches equipment that is not
+            # connected, which is the whole point before an unattended run
+            note = start(NinaAPI(base))
+        except Exception as exc:                         # noqa: BLE001
+            return {"error": str(exc)}
+        return {"ok": True, "note": note}
+
+    @app.post("/api/send_sequence")
+    async def send_sequence(name: str, request: Request):
         """
         Write an uploaded N.I.N.A. sequence into the capture PC's sequence
         folder, reached over its network share.
@@ -381,9 +463,11 @@ home screen. The address stays the same between restarts.</p>
         outside the configured folder.
         """
         check(request)
-        dest_dir = (load_settings().get("nina_dir") or "").strip()
-        if not dest_dir:
-            return {"error": "Set the N.I.N.A. sequence folder first."}
+        cfg = load_settings()
+        dest_dir = (cfg.get("nina_dir") or "").strip()
+        nina = (cfg.get("nina_api") or "").strip()
+        if not dest_dir and not nina:
+            return {"error": "Set the N.I.N.A. address, or a folder to copy to."}
 
         body = await request.body()
         if len(body) > 5_000_000:
@@ -396,29 +480,47 @@ home screen. The address stays the same between restarts.</p>
             return {"error": "That JSON isn't a N.I.N.A. sequence (no "
                              "SequenceRootContainer at the top)."}
 
-        import re as _re
-        base = Path(name).name                      # drop any path parts
-        base = _re.sub(r"[^A-Za-z0-9._ -]", "_", base).strip(" .")
-        if not base.lower().endswith(".json"):
-            base += ".json"
-        if not base or base == ".json":
-            base = "transit-sequence.json"
+        notes, errors = [], []
 
-        folder = Path(dest_dir)
-        try:
-            if not folder.exists():
-                return {"error": f"Can't reach {folder}. Check the share is "
-                                 f"available from this computer, and that "
-                                 f"it's shared with write access."}
-            target = folder / base
-            tmp = folder / (base + ".part")
-            tmp.write_bytes(body)
-            os.replace(tmp, target)
-        except PermissionError:
-            return {"error": f"No write permission on {folder}. Share it with "
-                             f"write access for this computer's account."}
-        except OSError as exc:
-            return {"error": f"Couldn't write to {folder}: {exc}"}
+        # Straight into N.I.N.A. — no share, no file permissions, nothing to
+        # reach. The API accepts the sequence JSON in the request body.
+        if nina:
+            from .nina_api import NinaAPI, load_json
+            try:
+                load_json(NinaAPI(nina), body)
+                notes.append("loaded into N.I.N.A.")
+            except Exception as exc:                     # noqa: BLE001
+                errors.append(f"N.I.N.A. refused it: {exc}")
+
+        # A copy on disk is optional now: useful only so the sequence also
+        # shows up in Touch'N'Stars' list for later.
+        if dest_dir:
+            import re as _re
+            base = Path(name).name
+            base = _re.sub(r"[^A-Za-z0-9._ -]", "_", base).strip(" .")
+            if not base.lower().endswith(".json"):
+                base += ".json"
+            if not base or base == ".json":
+                base = "transit-sequence.json"
+            folder = Path(dest_dir)
+            try:
+                if not folder.exists():
+                    raise OSError("folder not reachable")
+                tmp = folder / (base + ".part")
+                tmp.write_bytes(body)
+                os.replace(tmp, folder / base)
+                notes.append(f"saved as {base}")
+            except PermissionError:
+                errors.append(f"no write permission on {folder}")
+            except OSError as exc:
+                errors.append(f"couldn't write to {folder}: {exc}")
+
+        if not notes:
+            return {"error": "; ".join(errors) or "Nothing was sent."}
+        note = "Sequence " + " and ".join(notes) + "."
+        if errors:
+            note += " (" + "; ".join(errors) + ")"
+        return {"ok": True, "note": note}
         return {"ok": True, "path": str(target)}
 
     @app.get("/api/lookup")
@@ -514,7 +616,8 @@ home screen. The address stays the same between restarts.</p>
                           ("depth_ppm", "--depth-ppm"),
                           ("duration_hours", "--duration-hours"),
                           ("epoch_bjd", "--epoch-bjd"), ("period", "--period"),
-                          ("after_idle", "--after-idle")):
+                          ("after_idle", "--after-idle"),
+                          ("nina_api", "--nina-api")):
             if v.get(key):
                 cmd += [flag, v[key]]
         # Site values come from the page (already saved above), falling back
