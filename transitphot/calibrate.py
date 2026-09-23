@@ -61,9 +61,60 @@ def make_master_dark(dark_dir: Path, master_bias: CCDData | None = None,
     return master
 
 
+def _binning_of(ccd) -> str:
+    """Binning as N.I.N.A. records it, e.g. '2x2', or '?' if absent."""
+    h = ccd.meta
+    for kx, ky in (("XBINNING", "YBINNING"), ("BINX", "BINY"),
+                   ("CCDXBIN", "CCDYBIN")):
+        if h.get(kx) and h.get(ky):
+            return f"{int(h[kx])}x{int(h[ky])}"
+    return "?"
+
+
+def _check_shapes(name: str, frame, reference, ref_name: str,
+                  rebin: bool = False):
+    """
+    Confirm a calibration frame matches the frames it will be applied to.
+
+    A shape mismatch is nearly always a binning mismatch — flats taken at
+    1x1 against lights at 2x2, say — and without this check it surfaces deep
+    inside ccdproc as an unhelpful broadcast error after several minutes of
+    combining.
+
+    With rebin=True an integer-factor mismatch is fixed by summing blocks of
+    the finer frame, which is what hardware binning does. That is a fair
+    approximation for a flat (the response is linear), and a poor idea for
+    bias or dark frames, whose noise does not combine the same way.
+    """
+    if frame.shape == reference.shape:
+        return frame
+    fy, fx = frame.shape
+    ry, rx = reference.shape
+    detail = (f"{name} is {fx}x{fy} ({_binning_of(frame)}) but {ref_name} is "
+              f"{rx}x{ry} ({_binning_of(reference)})")
+    if not rebin or fy % ry or fx % rx:
+        raise SystemExit(
+            f"Calibration frames don't match: {detail}.\n"
+            f"Flats, darks and bias must be taken at the same binning as the "
+            f"lights.\nEither re-shoot them to match, drop --flats and "
+            f"calibrate with bias and darks only,\nor pass --rebin-flats to "
+            f"bin finer flats down in software.")
+    ky, kx = fy // ry, fx // rx
+    import numpy as _np
+    print(f"  rebinning {name} by {kx}x{ky} to match {ref_name} ({detail})")
+    data = frame.data.reshape(ry, ky, rx, kx).sum(axis=(1, 3))
+    out = frame.copy()
+    out.data = data
+    if out.uncertainty is not None:
+        out.uncertainty = None          # no longer valid after summing
+    return out
+
+
+
 def make_master_flat(flat_dir: Path, master_bias: CCDData | None = None,
                      master_dark: CCDData | None = None,
-                     out: Path | None = None) -> CCDData:
+                     out: Path | None = None,
+                     rebin: bool = False) -> CCDData:
     """Flats are combined after bias/dark removal, then normalized to unity."""
     paths = sorted(Path(flat_dir).glob("*.fit*"))
     if not paths:
@@ -72,8 +123,10 @@ def make_master_flat(flat_dir: Path, master_bias: CCDData | None = None,
     for p in paths:
         f = CCDData.read(p, unit="adu")
         if master_bias is not None:
+            f = _check_shapes("the flats", f, master_bias, "the bias", rebin)
             f = ccdproc.subtract_bias(f, master_bias)
         if master_dark is not None:
+            f = _check_shapes("the flats", f, master_dark, "the darks", rebin)
             f = ccdproc.subtract_dark(f, master_dark, exposure_time="EXPTIME",
                                       exposure_unit=u.s, scale=False)
         cleaned.append(f)
@@ -109,8 +162,8 @@ def calibrate_light(path: Path, master_bias: CCDData | None,
 
 def calibrate_night(lights_dir: Path, bias_dir: Path | None = None,
                     darks_dir: Path | None = None, flats_dir: Path | None = None,
-                    out_dir: Path | None = None, scale_dark: bool = False
-                    ) -> list[Path]:
+                    out_dir: Path | None = None, scale_dark: bool = False,
+                    rebin_flats: bool = False) -> list[Path]:
     """
     Full calibration pass over a night's lights. Any missing calibration
     directory is simply skipped — a dark-only workflow is valid.
@@ -118,7 +171,8 @@ def calibrate_night(lights_dir: Path, bias_dir: Path | None = None,
     """
     mb = make_master_bias(bias_dir) if bias_dir else None
     md = make_master_dark(darks_dir, mb) if darks_dir else None
-    mf = make_master_flat(flats_dir, mb, md) if flats_dir else None
+    mf = (make_master_flat(flats_dir, mb, md, rebin=rebin_flats)
+          if flats_dir else None)
 
     out_dir = Path(out_dir or Path(lights_dir) / "calibrated")
     out_dir.mkdir(parents=True, exist_ok=True)

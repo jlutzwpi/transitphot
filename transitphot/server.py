@@ -149,6 +149,8 @@ PAGE = """<!DOCTYPE html>
     <div><label for="elevation">Elevation (m)</label><input id="elevation" inputmode="decimal"></div>
     <div><label for="binning">Binning</label><input id="binning" placeholder="1x1"></div>
   </div>
+  <button type="button" id="gpsbtn" onclick="useGPS()">Use this phone's location</button>
+  <div id="gpsmsg" class="hint"></div>
   <label for="nina_api">N.I.N.A. address (Advanced API)</label>
   <input id="nina_api" placeholder="http://192.168.86.246:1888">
   <div class="hint">When set, processing starts the moment the sequence
@@ -235,6 +237,45 @@ async function lookup() {
   }
 }
 
+function useGPS() {
+  const msg = g("gpsmsg");
+  // Browsers only expose geolocation on secure origins: https, or localhost.
+  // Over a plain-http LAN address the API simply isn't there, so say why
+  // rather than letting the button do nothing.
+  if (!navigator.geolocation || !window.isSecureContext) {
+    msg.textContent = "Your browser only shares location over a secure "
+      + "connection. Open this page over Tailscale with https (tailscale cert), "
+      + "or type the values in — a decimal place or two is plenty.";
+    return;
+  }
+  g("gpsbtn").disabled = true;
+  msg.textContent = "Asking your phone for a fix…";
+  navigator.geolocation.getCurrentPosition(pos => {
+    const c = pos.coords;
+    g("lat").value = c.latitude.toFixed(5);
+    g("lon").value = c.longitude.toFixed(5);
+    let note = "Set to " + c.latitude.toFixed(5) + ", " + c.longitude.toFixed(5)
+             + " (±" + Math.round(c.accuracy) + " m).";
+    if (c.altitude != null && isFinite(c.altitude)) {
+      g("elevation").value = Math.round(c.altitude);
+      note += " Elevation " + Math.round(c.altitude) + " m";
+      if (c.altitudeAccuracy != null)
+        note += " (±" + Math.round(c.altitudeAccuracy) + " m)";
+      note += " — GPS altitude is rough; a known figure is better.";
+    } else {
+      note += " No altitude from GPS — enter it if you know it.";
+    }
+    msg.textContent = note;
+    g("gpsbtn").disabled = false;
+  }, err => {
+    msg.textContent = err.code === 1
+      ? "Location permission was refused — allow it for this site, or type "
+        + "the values in."
+      : "Couldn't get a fix: " + err.message;
+    g("gpsbtn").disabled = false;
+  }, {enableHighAccuracy: true, timeout: 20000, maximumAge: 60000});
+}
+
 async function uploadSeq() {
   const msg = g("uploadmsg");
   const f = g("seqfile").files[0];
@@ -274,7 +315,7 @@ async function startSeq() {
     }
   } catch (e) { msg.textContent = "Can't reach N.I.N.A.: " + e.message; return; }
 
-  if (!confirm("Start " + what + " now?\n\nThis moves the mount and begins "
+  if (!confirm("Start " + what + " now?\\n\\nThis moves the mount and begins "
                + "imaging.")) return;
   g("startseqbtn").disabled = true;
   msg.textContent = "Starting…";
@@ -323,6 +364,33 @@ async function stop() {
   g("status").textContent = "Stopping…";
 }
 </script></body></html>"""
+
+
+def _self_check_page() -> list[str]:
+    """
+    Faults in the page that would disable every button at once.
+
+    PAGE is an ordinary triple-quoted string, so a single-backslash escape
+    meant for the browser (\\n inside a JS string) is consumed by Python and
+    becomes a real newline — which ends the JS string literal, breaks the
+    parse, and leaves every onclick handler undefined. That looks, from the
+    phone, exactly like the buttons being disabled.
+    """
+    import re as _re
+    problems = []
+    m = _re.search(r"<script>(.*?)</script>", PAGE, _re.S)
+    if not m:
+        return ["no <script> block in the page"]
+    for n, line in enumerate(m.group(1).split("\n"), 1):
+        code = _re.sub(r"\\.", "", line)
+        if code.count('"') % 2 and not code.lstrip().startswith("//"):
+            problems.append(f"line {n}: unterminated double-quoted string")
+    # every id the JS reads must exist in the markup
+    ids = set(_re.findall(r'id="(\w+)"', PAGE))
+    for name in _re.findall(r'g\("(\w+)"\)', PAGE):
+        if name not in ids:
+            problems.append(f"JS reads missing element id '{name}'")
+    return problems
 
 
 def build_app(token: Optional[str], urls: Optional[list] = None):
@@ -802,6 +870,11 @@ def serve(host: str = "0.0.0.0", port: int = 8765, use_token: bool = True,
     print(f"  on this machine : http://localhost:{port}/{q}")
     for label, url in urls:
         print(f"  {label:16s}: {url}")
+
+    if tailscale:
+        print("\nFor the phone's GPS button, the page must be a secure origin."
+              "\nOn Tailscale:  tailscale cert <machine>.<tailnet>.ts.net"
+              f"\nthen serve it over https on port {port}.")
 
     print(f"\nTo open it on a phone, visit http://localhost:{port}/qr on "
           f"this computer\nand scan the code. The address stays the same "

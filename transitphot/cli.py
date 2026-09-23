@@ -25,6 +25,7 @@ def cmd_calibrate(args):
         Path(args.darks) if args.darks else None,
         Path(args.flats) if args.flats else None,
         Path(args.out) if args.out else None,
+        rebin_flats=getattr(args, "rebin_flats", False),
     )
     print(f"Calibrated {len(written)} frames -> {written[0].parent if written else '-'}")
 
@@ -93,6 +94,14 @@ def cmd_run(args):
     field = cs.query_field(args.ra, args.dec, radius_arcmin=radius)
 
     tcol = cs.target_color_from(field, args.ra, args.dec)
+    # Rank only stars that land on the sensor. The search radius is the
+    # frame's half-diagonal, so on a small or elongated field most of that
+    # circle is off-chip.
+    from astropy.io import fits as _f
+    field, n_off = ph.sources_in_frame(_f.getheader(paths[0]), field)
+    if n_off:
+        print(f"{n_off} catalog star(s) in the search radius fall outside the "
+              f"frame; ranking the {len(field)} that don't")
     if tcol is not None:
         print(f"Target color BP-RP {tcol:.2f} (Gaia) — matching comparisons to it")
     else:
@@ -114,6 +123,20 @@ def cmd_run(args):
         print(f"Rejected {len(rejected)} candidate(s) as variable:")
         for mag, sep, why in sorted(rejected, key=lambda r: r[1])[:8]:
             print(f"  G={mag:.2f}  {sep:.1f}' away  — {why}")
+
+    # Bright targets have few equals nearby, so the default magnitude window
+    # can come up short. Widen it rather than failing — a comparison one or
+    # two magnitudes off is far better than not measuring at all.
+    for wider in (2.5, 3.5):
+        if len(comps) >= 3:
+            break
+        comps = cs.select(args.ra, args.dec, args.target_mag, field,
+                          n=args.n_comps, filter_band=args.filter_band,
+                          target_color=tcol, variables=variables,
+                          mag_tolerance=wider)
+        if len(comps) >= 2:
+            print(f"Widened the magnitude window to +/-{wider:g} mag to find "
+                  f"{len(comps)} comparison stars")
     if not comps:
         raise SystemExit("No suitable comparison stars found — widen --radius "
                          "or relax the magnitude tolerance.")
@@ -697,6 +720,9 @@ def main():
     c.add_argument("--bias")
     c.add_argument("--darks")
     c.add_argument("--flats")
+    c.add_argument("--rebin-flats", action="store_true", dest="rebin_flats",
+                   help="bin flats down in software when they were shot at a "
+                        "finer binning than the lights")
     c.add_argument("--out")
     c.set_defaults(func=cmd_calibrate)
 

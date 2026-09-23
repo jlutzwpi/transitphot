@@ -467,3 +467,33 @@ def session_exposure(paths, sample: int = 25) -> float:
             except ValueError:
                 pass
     return 0.0
+
+
+def sources_in_frame(header, sources, margin_px: float = 60.0):
+    """
+    Keep only catalog sources that land on the sensor.
+
+    The comparison search radius is the frame's half-diagonal, so a star
+    within it can still be off-sensor in any direction but the corners —
+    badly so on a small or elongated field. Selecting from a radius and
+    discarding afterwards wastes the best candidates and can leave too few;
+    projecting first means the selection only ever ranks stars that can
+    actually be measured.
+    """
+    try:
+        from astropy.wcs import WCS
+        w = WCS(header)
+        if not w.has_celestial:
+            return sources, 0
+        ny = int(header.get("NAXIS2") or 0)
+        nx = int(header.get("NAXIS1") or 0)
+        if not (nx and ny):
+            return sources, 0
+        x, y = w.celestial.all_world2pix(np.asarray(sources["ra"], float),
+                                         np.asarray(sources["dec"], float), 0)
+        inside = ((x >= margin_px) & (x <= nx - margin_px) &
+                  (y >= margin_px) & (y <= ny - margin_px) &
+                  np.isfinite(x) & np.isfinite(y))
+        return sources[inside], int((~inside).sum())
+    except Exception:                                    # noqa: BLE001
+        return sources, 0
