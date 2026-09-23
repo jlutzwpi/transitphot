@@ -61,7 +61,8 @@ def measure_fwhm(data: np.ndarray, xy: tuple[float, float],
 
 
 def session_fwhm(paths, positions_fn, sample: int = 15,
-                 default: float = 4.0, report: bool = False) -> float:
+                 default: float = 4.0, report: bool = False,
+                 others_fn=None) -> float:
     """
     One FWHM for the whole session, from a sample of frames.
 
@@ -71,21 +72,43 @@ def session_fwhm(paths, positions_fn, sample: int = 15,
     flux variation is indistinguishable from a real signal. Seeing does vary
     through a night, but a fixed aperture sized for the worst of it is far
     better than one that tracks it.
+
+    Measured on the comparison stars as well as the target, taking the
+    median. A bright target's profile flattens near the top of the well
+    long before it clips, and the half-maximum contour then sits far out in
+    the wings — which reads as a hugely inflated FWHM and sizes every
+    aperture wrong. Fainter comparisons are unaffected, so their median is
+    the more honest number.
     """
-    vals = []
+    vals, tgt_vals = [], []
     step = max(len(paths) // sample, 1)
     for p in paths[::step][:sample]:
         try:
             data = fits.getdata(p).astype(float)
             hdr = fits.getheader(p)
-            xy = positions_fn(hdr)
-            if xy is None:
-                continue
-            f = measure_fwhm(data, xy)
-            if np.isfinite(f):
-                vals.append(f)
         except Exception:                            # noqa: BLE001
             continue
+        here = []
+        try:
+            xy = positions_fn(hdr)
+            if xy is not None:
+                f = measure_fwhm(data, xy)
+                if np.isfinite(f):
+                    tgt_vals.append(f)
+                    here.append(f)
+        except Exception:                            # noqa: BLE001
+            pass
+        if others_fn is not None:
+            try:
+                for xy in (others_fn(hdr) or []):
+                    f = measure_fwhm(data, xy)
+                    if np.isfinite(f):
+                        here.append(f)
+            except Exception:                        # noqa: BLE001
+                pass
+        if here:
+            vals.append(float(np.median(here)))
+
     if not vals:
         if report:
             # Silently falling back here hides the most common setup error:
@@ -95,6 +118,16 @@ def session_fwhm(paths, positions_fn, sample: int = 15,
                   f"sampled frame — falling back to FWHM {default} px. "
                   f"Check that the coordinates match this data.")
         return default
+
+    if report and tgt_vals and len(vals) >= 3:
+        t = float(np.median(tgt_vals))
+        m = float(np.median(vals))
+        if t > 1.6 * m:
+            print(f"NOTE: the target measures {t:.1f} px across against "
+                  f"{m:.1f} px for the field — its profile is flattening, so "
+                  f"it is probably close to the top of the well. Using the "
+                  f"field value; consider shorter subs.")
+
     # 80th percentile: size for the poorer-seeing frames so no frame has its
     # star spilling outside the aperture.
     return float(np.percentile(vals, 80))

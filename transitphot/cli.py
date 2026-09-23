@@ -159,8 +159,17 @@ def cmd_run(args):
               "headers or filenames. Pass --exposure if you need it in the "
               "AAVSO report.")
 
-    fwhm = args.fwhm if args.fwhm else ph.session_fwhm(paths, _target_xy,
-                                                      report=True)
+    def _comp_xy(hdr):
+        out = []
+        for c in comps[:4]:
+            try:
+                out.append(ph.sky_to_pixel(hdr, c.ra_deg, c.dec_deg))
+            except Exception:                            # noqa: BLE001
+                continue
+        return out
+
+    fwhm = args.fwhm if args.fwhm else ph.session_fwhm(
+        paths, _target_xy, report=True, others_fn=_comp_xy)
     if not args.fwhm and not (1.5 <= fwhm <= 12.0):
         print(f"WARNING: measured session FWHM {fwhm:.1f} px is outside the "
               f"usual 2-8 px range. Check the finder chart; override with "
