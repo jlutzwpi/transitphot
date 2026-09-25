@@ -198,7 +198,8 @@ class App(tk.Tk):
                        ("filter_band", "Filter (R, L, V...)"),
                        ("aavso_obscode", "AAVSO observer code"),
                        ("aavso_filter", "AAVSO filter code"),
-                       ("binning", "Binning (1x1, 2x2)")]
+                       ("binning", "Binning (1x1, 2x2)"),
+                       ("sensor_height_mm", "Sensor height (mm)")]
         for r, (key, label) in enumerate(site_fields, start=4):
             ttk.Label(f2, text=label).grid(row=r, column=2, sticky="w", **pad)
             var = tk.StringVar()
@@ -550,10 +551,18 @@ class App(tk.Tk):
         self._launch(cmd, "Plate solving…")
 
     def _field_height_deg(self, v) -> float | None:
-        """Field height from focal length and a 15.7 mm sensor, if known."""
+        """
+        Field height in degrees, for the plate solver.
+
+        Needs the sensor's short dimension, which differs by camera: 15.7 mm
+        on an APS-C sensor like the ASI2600MM, 24 mm on a full-frame one like
+        the QHY600, 13.5 mm on a KAF-8300. Assuming one of them silently
+        mis-sizes the search on every other camera.
+        """
         try:
             fl = float(v.get("focal_length_mm") or 0)
-            return 57.3 * 15.7 / fl if fl > 0 else None
+            h = float(v.get("sensor_height_mm") or 15.7)
+            return 57.3 * h / fl if fl > 0 and h > 0 else None
         except (TypeError, ValueError):
             return None
 

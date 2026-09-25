@@ -44,6 +44,14 @@ FILTER_MAP = {
     "B": ("TB", "Broadband LRGB blue, not Johnson B"),
     "BLUE": ("TB", "Broadband LRGB blue, not Johnson B"),
     "RC": ("R", ""),          # an actual Cousins R
+    # Sloan filters are proper photometric passbands with their own AAVSO
+    # designations, so they map directly rather than falling back to "other".
+    # Written variously as r', SR, "Sloan r" or just r.
+    "R'": ("SR", ""), "SLOAN R": ("SR", ""), "SDSS R": ("SR", ""), "SR": ("SR", ""),
+    "G'": ("SG", ""), "SLOAN G": ("SG", ""), "SDSS G": ("SG", ""), "SG": ("SG", ""),
+    "I'": ("SI", ""), "SLOAN I": ("SI", ""), "SDSS I": ("SI", ""), "SI": ("SI", ""),
+    "Z'": ("SZ", ""), "SLOAN Z": ("SZ", ""), "SDSS Z": ("SZ", ""), "SZ": ("SZ", ""),
+    "U'": ("SU", ""), "SLOAN U": ("SU", ""), "SDSS U": ("SU", ""), "SU": ("SU", ""),
     "V": ("V", ""),
     "I": ("I", ""),
     "IC": ("I", ""),

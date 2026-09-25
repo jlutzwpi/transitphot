@@ -151,6 +151,12 @@ PAGE = """<!DOCTYPE html>
   </div>
   <button type="button" id="gpsbtn" onclick="useGPS()">Use this phone's location</button>
   <div id="gpsmsg" class="hint"></div>
+  <div class="row">
+    <div><label for="focal_length_mm">Focal length (mm)</label><input id="focal_length_mm" inputmode="decimal"></div>
+    <div><label for="sensor_height_mm">Sensor height (mm)</label><input id="sensor_height_mm" inputmode="decimal" placeholder="15.7"></div>
+  </div>
+  <div class="hint">Used to size the plate-solve search: 15.7 for APS-C,
+    24 for full frame, 13.5 for a KAF-8300.</div>
   <label for="nina_api">N.I.N.A. address (Advanced API)</label>
   <input id="nina_api" placeholder="http://192.168.86.246:1888">
   <div class="hint">When set, processing starts the moment the sequence
@@ -179,7 +185,8 @@ PAGE = """<!DOCTYPE html>
 const F = ["source","lights_root","bias","darks","flats","target_name","ra","dec",
            "target_mag","depth_ppm","duration_hours","filter_band","epoch_bjd",
            "period","after_idle","lat","lon","elevation","binning",
-           "aavso_obscode","aavso_filter","nina_dir","nina_api"];
+           "aavso_obscode","aavso_filter","nina_dir","nina_api",
+           "focal_length_mm","sensor_height_mm"];
 const g = id => document.getElementById(id);
 const say = t => { const l = g("log"); l.textContent += t;
                    l.scrollTop = l.scrollHeight; };

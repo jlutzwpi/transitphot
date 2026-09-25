@@ -122,6 +122,7 @@ def make_master_flat(flat_dir: Path, master_bias: CCDData | None = None,
     if not paths:
         raise FileNotFoundError(f"No FITS files in {flat_dir}")
     cleaned = []
+    scaled_note = [False]
     for p in paths:
         f = CCDData.read(p, unit="adu")
         if master_bias is not None:
@@ -129,15 +130,55 @@ def make_master_flat(flat_dir: Path, master_bias: CCDData | None = None,
             f = ccdproc.subtract_bias(f, master_bias)
         if master_dark is not None:
             f = _check_shapes("the flats", f, master_dark, "the darks", rebin)
-            f = ccdproc.subtract_dark(f, master_dark, exposure_time="EXPTIME",
-                                      exposure_unit=u.s, scale=False)
+            # Sky flats are short; the darks are usually shot to match the
+            # lights. Subtracting a 60 s dark from a 2 s flat removes far
+            # more than is there and drives pixels to zero or below, which
+            # then divides into the lights as infinity. Scale by exposure
+            # when they differ, and say so.
+            t_flat = float(f.meta.get("EXPTIME") or f.meta.get("EXPOSURE") or 0)
+            t_dark = float(master_dark.meta.get("EXPTIME")
+                           or master_dark.meta.get("EXPOSURE") or 0)
+            if t_flat and t_dark and abs(t_flat - t_dark) > 0.1 * t_dark:
+                if not scaled_note[0]:
+                    print(f"  flats are {t_flat:g}s and the darks {t_dark:g}s "
+                          f"— scaling the dark by exposure for the flats")
+                    scaled_note[0] = True
+                f = ccdproc.subtract_dark(f, master_dark,
+                                          exposure_time="EXPTIME",
+                                          exposure_unit=u.s, scale=True)
+            else:
+                f = ccdproc.subtract_dark(f, master_dark,
+                                          exposure_time="EXPTIME",
+                                          exposure_unit=u.s, scale=False)
         cleaned.append(f)
     master = ccdproc.combine(cleaned, method="median", mem_limit=1_500e6,
                              sigma_clip=True,
                              sigma_clip_low_thresh=5, sigma_clip_high_thresh=5,
                              sigma_clip_func=np.ma.median,
                              sigma_clip_dev_func=np.ma.std)
-    master.data = master.data / np.median(master.data)     # normalize
+    norm = float(np.median(master.data))
+    if not np.isfinite(norm) or norm <= 0:
+        raise SystemExit(
+            "The master flat has a median of zero or less, so it cannot be "
+            "used.\nThis usually means the darks subtracted from the flats "
+            "were far longer exposures.\nRe-shoot flat darks to match the "
+            "flats, or calibrate the flats with bias only.")
+    master.data = master.data / norm                       # normalize
+
+    # A pixel at or below zero divides into infinity. Leave those pixels
+    # uncorrected (a factor of 1) rather than poisoning every light frame,
+    # and report how many, since a large count means the flats are wrong.
+    bad = ~np.isfinite(master.data) | (master.data <= 0.05)
+    n_bad = int(bad.sum())
+    if n_bad:
+        frac = n_bad / master.data.size
+        master.data[bad] = 1.0
+        msg = (f"  {n_bad} flat pixel(s) ({frac:.2%}) were zero, negative or "
+               f"not finite; left uncorrected")
+        if frac > 0.01:
+            msg += ("\n  That is a lot — check the flats are properly "
+                    "exposed and that their darks match.")
+        print(msg)
     master.meta["IMAGETYP"] = "MASTER FLAT"
     master.meta["NCOMBINE"] = len(paths)
     if out:
