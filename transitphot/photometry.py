@@ -408,25 +408,56 @@ def normalize_out_of_transit(times, flux, mid=None, duration_days=None):
     return flux / ref if np.isfinite(ref) and ref != 0 else flux
 
 
-def transparency_mask(comp_flux: np.ndarray, min_fraction: float = 0.6):
+def transparency_mask(comp_flux: np.ndarray, min_fraction: float = 0.6,
+                      window: int = 41):
     """
     Flag frames taken through significant cloud.
 
-    The summed comparison flux is a direct transparency meter: when cloud
-    passes, every star dims together. Differential photometry corrects the
-    *level*, but not the lost signal-to-noise — a frame at 30% transparency
-    has roughly a third the photons and several times the scatter, and it
-    contributes far more noise than information.
+    The summed comparison flux is a transparency meter: when cloud passes,
+    every star dims together. Differential photometry corrects the *level*
+    but not the lost signal-to-noise, so a frame at 30% transparency carries
+    a third of the photons and several times the scatter.
 
-    Returns a boolean mask of frames to keep, plus the transparency series.
+    Measured against a LOCAL trend rather than the session median. Airmass
+    falls steadily through a session that ends low, and against a global
+    median that slow decline looks exactly like cloud: on a Qatar-3 b run
+    reaching airmass 1.65, a session-median threshold discarded 79 of 261
+    frames whose only fault was being taken late. Comparing each frame to
+    its neighbors separates a passing cloud — abrupt, minutes long — from
+    extinction, which is gradual and affects the whole tail of the night.
+
+    Returns a boolean mask of frames to keep, plus the transparency series
+    relative to the local trend.
     """
     comp_flux = np.asarray(comp_flux, dtype=float)
     total = np.nansum(comp_flux, axis=0)
+    n = total.size
     ref = np.nanmedian(total)
-    if not np.isfinite(ref) or ref <= 0:
-        return np.ones(total.shape, dtype=bool), np.ones_like(total)
-    frac = total / ref
-    return frac > min_fraction, frac
+    if not np.isfinite(ref) or ref <= 0 or n == 0:
+        return np.ones(n, dtype=bool), np.ones(n)
+
+    # Running median as the local reference. Wide enough that a few cloudy
+    # frames cannot drag it down with them, narrow enough to follow the
+    # session's own decline.
+    w = int(min(max(window | 1, 5), max(n // 2 * 2 - 1, 5)))
+    half = w // 2
+    trend = np.empty(n, dtype=float)
+    for i in range(n):
+        lo, hi = max(0, i - half), min(n, i + half + 1)
+        seg = total[lo:hi]
+        seg = seg[np.isfinite(seg)]
+        trend[i] = np.median(seg) if seg.size else np.nan
+    bad = ~np.isfinite(trend) | (trend <= 0)
+    trend[bad] = ref
+
+    frac = total / trend
+    # A frame far below the session's own peak is dim in absolute terms too
+    # — deep cloud that lasts long enough to bend the local trend. Keep an
+    # absolute floor at half the chosen threshold so those still go.
+    peak = np.nanpercentile(total, 90)
+    absolute = total / peak if np.isfinite(peak) and peak > 0 else frac
+    keep = (frac > min_fraction) & (absolute > min_fraction * 0.5)
+    return keep, frac
 
 
 def field_radius_arcmin(header, default: float = 20.0) -> float:
