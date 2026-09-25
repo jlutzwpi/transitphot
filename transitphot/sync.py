@@ -28,7 +28,7 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
-FITS_SUFFIXES = (".fit", ".fits", ".fts")
+from .photometry import FITS_SUFFIXES  # noqa: E402
 
 
 def _fits_files(root: Path) -> list[Path]:

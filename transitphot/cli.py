@@ -42,7 +42,7 @@ def cmd_run(args):
     from . import compstars as cs
     from astropy.io import fits
 
-    paths = sorted(Path(args.lights).glob("*.fit*"))
+    paths = ph.fits_files(args.lights)
     if not paths:
         raise SystemExit(f"No FITS files in {args.lights}")
     # All products land in one folder per target, so a night's results stay

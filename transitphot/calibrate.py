@@ -15,6 +15,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from .photometry import fits_files
+
 import numpy as np
 from astropy import units as u
 from astropy.nddata import CCDData
@@ -35,7 +37,7 @@ def _combine(paths: list[Path], unit: str = "adu", method: str = "median",
 
 
 def make_master_bias(bias_dir: Path, out: Path | None = None) -> CCDData:
-    paths = sorted(Path(bias_dir).glob("*.fit*"))
+    paths = fits_files(bias_dir)
     if not paths:
         raise FileNotFoundError(f"No FITS files in {bias_dir}")
     master = _combine(paths)
@@ -48,7 +50,7 @@ def make_master_bias(bias_dir: Path, out: Path | None = None) -> CCDData:
 
 def make_master_dark(dark_dir: Path, master_bias: CCDData | None = None,
                      out: Path | None = None) -> CCDData:
-    paths = sorted(Path(dark_dir).glob("*.fit*"))
+    paths = fits_files(dark_dir)
     if not paths:
         raise FileNotFoundError(f"No FITS files in {dark_dir}")
     master = _combine(paths)
@@ -116,7 +118,7 @@ def make_master_flat(flat_dir: Path, master_bias: CCDData | None = None,
                      out: Path | None = None,
                      rebin: bool = False) -> CCDData:
     """Flats are combined after bias/dark removal, then normalized to unity."""
-    paths = sorted(Path(flat_dir).glob("*.fit*"))
+    paths = fits_files(flat_dir)
     if not paths:
         raise FileNotFoundError(f"No FITS files in {flat_dir}")
     cleaned = []
@@ -178,7 +180,7 @@ def calibrate_night(lights_dir: Path, bias_dir: Path | None = None,
     out_dir.mkdir(parents=True, exist_ok=True)
 
     written = []
-    for p in sorted(Path(lights_dir).glob("*.fit*")):
+    for p in fits_files(lights_dir):
         cal = calibrate_light(p, mb, md, mf, scale_dark=scale_dark)
         dest = out_dir / f"cal_{p.name}"
         cal.write(dest, overwrite=True)

@@ -530,3 +530,25 @@ def sources_in_frame(header, sources, margin_px: float = 60.0):
         return sources[inside], int((~inside).sum())
     except Exception:                                    # noqa: BLE001
         return sources, 0
+
+
+# Extensions FITS files actually arrive with. ".fts" is the DOS-era 8.3 form
+# and is still what several observatory control systems write — PlaneWave
+# and ACP among them — so a glob of "*.fit*" silently finds nothing on a
+# perfectly good folder.
+FITS_SUFFIXES = (".fit", ".fits", ".fts", ".fit.gz", ".fits.gz", ".fts.gz",
+                 ".fz")
+
+
+def fits_files(directory, recursive: bool = False) -> list:
+    """Every FITS file in a directory, whatever spelling it uses."""
+    d = Path(directory)
+    it = d.rglob("*") if recursive else d.glob("*")
+    out = []
+    for p in it:
+        if not p.is_file():
+            continue
+        name = p.name.lower()
+        if any(name.endswith(s) for s in FITS_SUFFIXES):
+            out.append(p)
+    return sorted(out)

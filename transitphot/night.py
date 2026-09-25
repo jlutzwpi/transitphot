@@ -19,6 +19,8 @@ import sys
 import time
 from pathlib import Path
 
+from .photometry import fits_files
+
 
 def _say(msg: str):
     print(msg, flush=True)
@@ -83,14 +85,14 @@ def run_night(args, *, cmd_sync, cmd_calibrate, cmd_check, cmd_solve, cmd_run):
             _say(f"Couldn't save the image history ({exc})")
 
     lights = Path(args.lights_root)
-    if not any(lights.rglob("*.fit*")):
+    if not fits_files(lights, recursive=True):
         raise SystemExit(f"No FITS files under {lights} — nothing to process.")
 
     # ---- 2. calibrate ---------------------------------------------------
     n += 1
     _step(n, steps, "Calibrate")
     cal_dir = lights / "calibrated"
-    if cal_dir.exists() and any(cal_dir.glob("*.fit*")) and not args.recalibrate:
+    if cal_dir.exists() and fits_files(cal_dir) and not args.recalibrate:
         _say(f"Calibrated frames already present in {cal_dir}; keeping them "
              f"(pass --recalibrate to redo).")
     else:
@@ -100,7 +102,7 @@ def run_night(args, *, cmd_sync, cmd_calibrate, cmd_check, cmd_solve, cmd_run):
         )
         cmd_calibrate(cal_args)
 
-    work = cal_dir if any(cal_dir.glob("*.fit*")) else lights
+    work = cal_dir if fits_files(cal_dir) else lights
 
     # ---- 3. plate solve what needs it -----------------------------------
     n += 1

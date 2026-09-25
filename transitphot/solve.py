@@ -25,6 +25,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from .photometry import fits_files
+
 WCS_KEYS = ("CRVAL1", "CRVAL2", "CRPIX1", "CRPIX2")
 ROT_KEYS = ("CD1_1", "CD1_2", "CD2_1", "CD2_2", "PC1_1", "CDELT1")
 
@@ -64,7 +66,7 @@ def inspect(path: Path) -> WcsReport:
 
 
 def inspect_dir(directory: Path) -> list[WcsReport]:
-    return [inspect(p) for p in sorted(Path(directory).glob("*.fit*"))]
+    return [inspect(p) for p in fits_files(directory)]
 
 
 def find_astap() -> str | None:
@@ -132,7 +134,7 @@ def solve_dir(directory: Path, ra_deg: float | None = None,
             "(plus a star database such as D50), and make sure the executable "
             "is on your PATH."
         )
-    paths = sorted(Path(directory).glob("*.fit*"))
+    paths = fits_files(directory)
     if not paths:
         raise FileNotFoundError(f"No FITS files in {directory}")
 
