@@ -203,6 +203,37 @@ def calibrate_light(path: Path, master_bias: CCDData | None,
     return img
 
 
+def _report_flat(master) -> None:
+    """
+    Describe the master flat's shape, and flag it when it looks wrong.
+
+    A flat should be brightest near the optical axis and fall off toward the
+    corners. If the center is DIMMER than the corners, dividing by it makes
+    the science frames darker in the middle — the "donut" look — and the
+    flat is describing a different optical configuration than the lights
+    were taken through.
+    """
+    d = np.asarray(master.data, dtype=float)
+    ny, nx = d.shape
+    cy, cx = ny // 2, nx // 2
+    h = max(min(ny, nx) // 10, 8)
+    center = float(np.nanmedian(d[cy - h:cy + h, cx - h:cx + h]))
+    corners = float(np.nanmedian(np.concatenate([
+        d[:2 * h, :2 * h].ravel(), d[:2 * h, -2 * h:].ravel(),
+        d[-2 * h:, :2 * h].ravel(), d[-2 * h:, -2 * h:].ravel()])))
+    if not (np.isfinite(center) and np.isfinite(corners) and corners > 0):
+        return
+    ratio = center / corners
+    print(f"  master flat: center/corner {ratio:.3f} "
+          f"(vignetting {100 * (1 - corners / center):+.1f}% at the corners)")
+    if ratio < 0.98:
+        print("  WARNING: the flat is DIMMER at the center than the corners. "
+              "Dividing by it\n  will darken the middle of every light frame. "
+              "Check the flats were taken\n  through the same optics, "
+              "reducer and filter as the lights.")
+
+
+
 def calibrate_night(lights_dir: Path, bias_dir: Path | None = None,
                     darks_dir: Path | None = None, flats_dir: Path | None = None,
                     out_dir: Path | None = None, scale_dark: bool = False,
@@ -212,13 +243,21 @@ def calibrate_night(lights_dir: Path, bias_dir: Path | None = None,
     directory is simply skipped — a dark-only workflow is valid.
     Returns the list of calibrated file paths.
     """
-    mb = make_master_bias(bias_dir) if bias_dir else None
-    md = make_master_dark(darks_dir, mb) if darks_dir else None
-    mf = (make_master_flat(flats_dir, mb, md, rebin=rebin_flats)
-          if flats_dir else None)
-
     out_dir = Path(out_dir or Path(lights_dir) / "calibrated")
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Write the masters alongside the calibrated frames. When calibration
+    # goes wrong the master is the thing you need to look at, and building
+    # it only in memory leaves nothing to inspect.
+    mb = (make_master_bias(bias_dir, out=out_dir / "master_bias.fits")
+          if bias_dir else None)
+    md = (make_master_dark(darks_dir, mb, out=out_dir / "master_dark.fits")
+          if darks_dir else None)
+    mf = (make_master_flat(flats_dir, mb, md, rebin=rebin_flats,
+                           out=out_dir / "master_flat.fits")
+          if flats_dir else None)
+    if mf is not None:
+        _report_flat(mf)
 
     written = []
     for p in fits_files(lights_dir):
