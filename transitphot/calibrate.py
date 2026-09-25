@@ -246,16 +246,21 @@ def calibrate_night(lights_dir: Path, bias_dir: Path | None = None,
     out_dir = Path(out_dir or Path(lights_dir) / "calibrated")
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Write the masters alongside the calibrated frames. When calibration
-    # goes wrong the master is the thing you need to look at, and building
-    # it only in memory leaves nothing to inspect.
-    mb = (make_master_bias(bias_dir, out=out_dir / "master_bias.fits")
+    # Write the masters, but in their own subfolder. When calibration goes
+    # wrong the master is the thing you need to look at — and putting them
+    # beside the calibrated lights means the next run globs them in as
+    # science frames.
+    masters = out_dir / "masters"
+    masters.mkdir(parents=True, exist_ok=True)
+    mb = (make_master_bias(bias_dir, out=masters / "master_bias.fits")
           if bias_dir else None)
-    md = (make_master_dark(darks_dir, mb, out=out_dir / "master_dark.fits")
+    md = (make_master_dark(darks_dir, mb, out=masters / "master_dark.fits")
           if darks_dir else None)
     mf = (make_master_flat(flats_dir, mb, md, rebin=rebin_flats,
-                           out=out_dir / "master_flat.fits")
+                           out=masters / "master_flat.fits")
           if flats_dir else None)
+    if mb is not None or md is not None or mf is not None:
+        print(f"  masters written to {masters}")
     if mf is not None:
         _report_flat(mf)
 

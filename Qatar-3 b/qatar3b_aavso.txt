@@ -14,8 +14,8 @@
 #FILTER=SR
 #DETREND_PARAMETERS=Airmass
 #MEASUREMENT_TYPE=Rnflux
-#PRIORS=period 2.5079204 d; duration 3.1104 h fixed; depth prior 7500.0 ppm; quadratic limb darkening u1=0.35 u2=0.25
-#RESULTS=Tc=2461307.57022 BJD_TDB +/-1.3 min; depth=12258+/-1796 ppm; duration=3.11 h; residual RMS=4806 ppm
+#PRIORS=period 2.50789979 d; duration 3.1104 h fixed; depth prior 7500.0 ppm; quadratic limb darkening u1=0.35 u2=0.25
+#RESULTS=Tc=2461307.57022 BJD_TDB +/-1.3 min; depth=12961+/-1802 ppm; duration=3.11 h; residual RMS=4812 ppm
 #NOTES=182 points. Aperture 7.1 px, sky annulus 23.0-39.4 px, 3 comparison stars. Reduced with transitphot (CMOS sensor reported as CCD per format).
 # DATE DIFF MERR DETREND_1 DETREND_2 DETREND_3 DETREND_4
 2461307.50024338,1.000093,0.003434,1.653443,n/a,n/a,n/a

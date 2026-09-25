@@ -549,6 +549,11 @@ def fits_files(directory, recursive: bool = False) -> list:
         if not p.is_file():
             continue
         name = p.name.lower()
+        # Master calibration frames live alongside data often enough that
+        # measuring one as a science frame is a real risk; they are never
+        # what a caller means by "the FITS files here".
+        if name.startswith(("master_", "master-", "cal_master")):
+            continue
         if any(name.endswith(s) for s in FITS_SUFFIXES):
             out.append(p)
     return sorted(out)
