@@ -413,6 +413,45 @@ def cmd_run(args):
     tflux = tflux[:, best_i]
     cflux = cflux[:, best_i, :].T                    # (n_comps, n_frames)
 
+    # Differential scatter measures each star against the ensemble of the
+    # others, so one catastrophic member poisons the reference for all of
+    # them. With a candidate pool that is twice the size we need, that is a
+    # real risk: on TOI-3629 b two runaway candidates (840,000 and 1,440,000
+    # ppm) inflated every other star from ~4,000 ppm to ~40,000, and the
+    # weighting then handed one star the entire ensemble.
+    #
+    # So trim the obviously broken members first, judged on their own flux
+    # variation rather than against each other, and only then measure
+    # stability among the survivors.
+    def _own_scatter(f):
+        f = np.asarray(f, dtype=float)
+        out = np.full(f.shape[0], np.nan)
+        for i in range(f.shape[0]):
+            v = f[i][np.isfinite(f[i])]
+            if v.size >= 5 and np.median(v) > 0:
+                out[i] = 1.4826 * np.median(np.abs(v - np.median(v))) \
+                    / np.median(v) * 1e6
+        return out
+
+    own = _own_scatter(cflux)
+    finite_own = own[np.isfinite(own)]
+    if finite_own.size >= 3 and len(comps) > args.n_comps:
+        limit = max(5.0 * np.median(finite_own), 50000.0)
+        broken = np.flatnonzero(~np.isfinite(own) | (own > limit))
+        if broken.size and len(comps) - broken.size >= args.n_comps:
+            print(f"Discarding {broken.size} candidate(s) whose own flux is "
+                  f"wildly unstable (>{limit:.0f} ppm):")
+            for i in broken:
+                print(f"  G={comps[i].mag:.2f}  {own[i]:,.0f} ppm")
+            survive = np.setdiff1d(np.arange(len(comps)), broken)
+            comps = [comps[i] for i in survive]
+            cflux = cflux[survive, :]
+            pool_map = survive
+        else:
+            pool_map = np.arange(len(comps))
+    else:
+        pool_map = np.arange(len(comps))
+
     scatter_ppm = cs.stability_report(cflux)
     kept_idx = None
 
@@ -427,7 +466,7 @@ def cmd_run(args):
         for c in dropped:
             i = comps.index(c)
             print(f"  set aside G={c.mag:.2f}  {scatter_ppm[i]:7.0f} ppm")
-        kept_idx = list(chosen)
+        kept_idx = [int(pool_map[i]) for i in chosen]
         comps = [comps[i] for i in chosen]
         cflux = cflux[chosen, :]
         scatter_ppm = scatter_ppm[chosen]
