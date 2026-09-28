@@ -115,8 +115,14 @@ def cmd_run(args):
         print(f"VSX lists {len(variables[1])} known variable(s) in the field")
 
     rejected: list = []
+    # Rank a wider pool than we need, then let the data choose. Catalog
+    # properties predict which stars SHOULD be stable; only the frames show
+    # which ones ARE. On KELT-16 b, stars scoring better on magnitude and
+    # color matching measured three times noisier than the ones they
+    # displaced, and the fitted mid-time moved 17 minutes as a result.
+    pool_n = max(args.n_comps * 2, args.n_comps + 4)
     comps = cs.select(args.ra, args.dec, args.target_mag, field,
-                      n=args.n_comps, filter_band=args.filter_band,
+                      n=pool_n, filter_band=args.filter_band,
                       target_color=tcol, variables=variables,
                       rejected=rejected)
     if rejected:
@@ -131,7 +137,7 @@ def cmd_run(args):
         if len(comps) >= 3:
             break
         comps = cs.select(args.ra, args.dec, args.target_mag, field,
-                          n=args.n_comps, filter_band=args.filter_band,
+                          n=pool_n, filter_band=args.filter_band,
                           target_color=tcol, variables=variables,
                           mag_tolerance=wider)
         if len(comps) >= 2:
@@ -313,6 +319,22 @@ def cmd_run(args):
     cflux = cflux[:, best_i, :].T                    # (n_comps, n_frames)
 
     scatter_ppm = cs.stability_report(cflux)
+
+    # Keep the steadiest n_comps of the pool, measured on these frames.
+    if len(comps) > args.n_comps:
+        order = np.argsort(np.where(np.isfinite(scatter_ppm),
+                                    scatter_ppm, np.inf))
+        chosen = np.sort(order[:args.n_comps])
+        dropped = [comps[i] for i in order[args.n_comps:]]
+        print(f"Measured {len(comps)} candidates; keeping the {args.n_comps} "
+              f"steadiest:")
+        for c in dropped:
+            i = comps.index(c)
+            print(f"  set aside G={c.mag:.2f}  {scatter_ppm[i]:7.0f} ppm")
+        comps = [comps[i] for i in chosen]
+        cflux = cflux[chosen, :]
+        scatter_ppm = scatter_ppm[chosen]
+
     keep = cs.check_stability(cflux)
     print("Comparison star stability (differential scatter):")
     for c, sc, k in zip(comps, scatter_ppm, keep):
