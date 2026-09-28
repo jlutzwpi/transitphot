@@ -608,6 +608,7 @@ def cmd_run(args):
             from . import limbdark as _ld
             try:
                 lf = _ld.fit(bjd, norm, err, period=args.period_days,
+                             flip_bjd=flip_bjd,
                              expected_mid=(args.predicted_mid
                                            or float(np.median(bjd))),
                              expected_depth=(args.depth_ppm / 1e6

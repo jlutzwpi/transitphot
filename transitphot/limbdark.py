@@ -45,6 +45,8 @@ class LimbDarkFit:
     duration_hours: float
     rms_ppm: float
     baseline_flux: float
+    flip_step: float
+    flip_bjd: float | None
     n_points: int
     u1: float
     u2: float
@@ -80,7 +82,8 @@ def _model_factory(t, period, u1, u2):
     params.limb_dark = "quadratic"
     params.u = [u1, u2]
 
-    def model(t_, mid, rp, a, inc, base, slope, curve):
+    def model(t_, mid, rp, a, inc, base, slope, curve, flip_step=0.0,
+              after_flip=None):
         params.t0 = mid
         params.rp = rp
         params.a = a
@@ -88,7 +91,10 @@ def _model_factory(t, period, u1, u2):
         m = batman.TransitModel(params, np.asarray(t_, dtype=float))
         flux = m.light_curve(params)
         dt = np.asarray(t_, dtype=float) - mid
-        return flux * (base + slope * dt + curve * dt ** 2)
+        cont = base + slope * dt + curve * dt ** 2
+        if after_flip is not None and flip_step:
+            cont = cont * np.where(after_flip, 1.0 + flip_step, 1.0)
+        return flux * cont
 
     return model
 
@@ -105,7 +111,8 @@ def transit_duration_hours(period, rp_rs, a_rs, inc_deg) -> float:
 def fit(bjd, flux, flux_err=None, *, period: float,
         expected_mid: float, expected_depth: float | None = None,
         expected_duration_hours: float | None = None,
-        u1: float = 0.35, u2: float = 0.25) -> LimbDarkFit:
+        u1: float = 0.35, u2: float = 0.25,
+        flip_bjd: float | None = None) -> LimbDarkFit:
     """
     Fit the Mandel-Agol model. `period` is required — the model needs it to
     convert between orbital phase and time, and it is known far better from
@@ -128,7 +135,25 @@ def fit(bjd, flux, flux_err=None, *, period: float,
     else:
         a0 = 8.0
 
-    model = _model_factory(bjd, period, u1, u2)
+    model_base = _model_factory(bjd, period, u1, u2)
+
+    # A meridian flip leaves a step between the halves of the night. Without
+    # it in the model, the fit shifts the transit to absorb the offset — on
+    # KELT-16 b that moved the mid-time by nearly 14 minutes while the
+    # trapezoid, which does model the step, sat within half a minute.
+    after_flip = None
+    if flip_bjd is not None:
+        m = np.asarray(bjd, dtype=float) > float(flip_bjd)
+        if 5 <= int(m.sum()) <= len(m) - 5:
+            after_flip = m
+
+    def model(t_, *pp):
+        pp = list(pp)
+        step = pp.pop() if after_flip is not None else 0.0
+        mask = after_flip
+        if mask is not None and len(t_) != len(mask):
+            mask = np.asarray(t_) > float(flip_bjd)
+        return model_base(t_, *pp, flip_step=step, after_flip=mask)
 
     # Bounds: the quadratic baseline is deliberately tight. Over a few-hour
     # window a loose curvature term can imitate a broad shallow transit, and
@@ -137,6 +162,8 @@ def fit(bjd, flux, flux_err=None, *, period: float,
     # ground-based transit does not redetermine planet size.
     lo = [bjd.min(), rp0 * 0.5, 1.5, 60.0, 0.95, -2.0, -3.0]
     hi = [bjd.max(), rp0 * 1.6, 60.0, 90.0, 1.05, 2.0, 3.0]
+    if after_flip is not None:
+        lo, hi = lo + [-0.05], hi + [0.05]
 
     # Multi-start over mid-time: the chi-square surface has shallow local
     # minima, and a single descent lands in whichever one it started nearest.
@@ -147,6 +174,8 @@ def fit(bjd, flux, flux_err=None, *, period: float,
     best_chi2 = np.inf
     for m in starts:
         p0 = [float(np.clip(m, lo[0], hi[0])), rp0, a0, 88.0, 1.0, 0.0, 0.0]
+        if after_flip is not None:
+            p0 = p0 + [0.0]
         p0 = [float(np.clip(v, a, b)) for v, a, b in zip(p0, lo, hi)]
         try:
             popt, pcov = curve_fit(model, bjd, flux, p0=p0, bounds=(lo, hi),
@@ -183,7 +212,10 @@ def fit(bjd, flux, flux_err=None, *, period: float,
         central_depth_ppm=float(central * 1e6),
         duration_hours=transit_duration_hours(period, rp, a, inc),
         rms_ppm=float(np.std(resid) * 1e6),
-        baseline_flux=float(popt[4]), n_points=len(bjd),
+        baseline_flux=float(popt[4]),
+        flip_step=float(popt[-1]) if after_flip is not None else 0.0,
+        flip_bjd=(float(flip_bjd) if after_flip is not None else None),
+        n_points=len(bjd),
         u1=u1, u2=u2,
     )
 
@@ -192,8 +224,12 @@ def model_curve(t, fit_result: LimbDarkFit, period: float,
                 base: float = 1.0, slope: float = 0.0, curve: float = 0.0):
     """Evaluate the fitted model on an arbitrary time grid, for plotting."""
     model = _model_factory(t, period, fit_result.u1, fit_result.u2)
+    step = getattr(fit_result, "flip_step", 0.0)
+    fb = getattr(fit_result, "flip_bjd", None)
+    mask = (np.asarray(t) > fb) if (fb and step) else None
     return model(t, fit_result.mid_bjd, fit_result.rp_rs, fit_result.a_rs,
-                 fit_result.inclination_deg, base, slope, curve)
+                 fit_result.inclination_deg, base, slope, curve,
+                 flip_step=step, after_flip=mask)
 
 
 # ----------------------------------------------------------------------
@@ -243,7 +279,8 @@ def _occulted_flux(z: np.ndarray, p: float, u1: float, u2: float,
 
 def _numpy_model_factory(period, u1, u2):
     """Same signature as the batman factory, implemented in numpy."""
-    def model(t_, mid, rp, a, inc, base, slope, curve):
+    def model(t_, mid, rp, a, inc, base, slope, curve, flip_step=0.0,
+              after_flip=None):
         t_ = np.asarray(t_, dtype=float)
         phase = 2.0 * np.pi * (t_ - mid) / period
         # projected separation in stellar radii (circular orbit)
@@ -253,5 +290,8 @@ def _numpy_model_factory(period, u1, u2):
         z = np.where(np.cos(phase) < 0, 99.0, z)
         flux = _occulted_flux(z, rp, u1, u2)
         dt = t_ - mid
-        return flux * (base + slope * dt + curve * dt ** 2)
+        cont = base + slope * dt + curve * dt ** 2
+        if after_flip is not None and flip_step:
+            cont = cont * np.where(after_flip, 1.0 + flip_step, 1.0)
+        return flux * cont
     return model
