@@ -297,7 +297,12 @@ def cmd_run(args):
         best_i, best_med = 0, np.inf
         for i, r in enumerate(RADII):
             sc = cs.stability_report(cflux[:, i, :].T)
-            med = float(np.nanmedian(sc))
+            # Median over the best n_comps only. With a pool twice that size,
+            # a few poor candidates drag the median around and can move the
+            # chosen aperture — the scan should reflect the stars that will
+            # actually be used.
+            good = np.sort(sc[np.isfinite(sc)])[:args.n_comps]
+            med = float(np.median(good)) if good.size else float("nan")
             if med < best_med:
                 best_i, best_med = i, med
             print(f"  {r:5.1f} px  {med:8.0f} ppm")
@@ -319,6 +324,7 @@ def cmd_run(args):
     cflux = cflux[:, best_i, :].T                    # (n_comps, n_frames)
 
     scatter_ppm = cs.stability_report(cflux)
+    kept_idx = None
 
     # Keep the steadiest n_comps of the pool, measured on these frames.
     if len(comps) > args.n_comps:
@@ -331,6 +337,7 @@ def cmd_run(args):
         for c in dropped:
             i = comps.index(c)
             print(f"  set aside G={c.mag:.2f}  {scatter_ppm[i]:7.0f} ppm")
+        kept_idx = list(chosen)
         comps = [comps[i] for i in chosen]
         cflux = cflux[chosen, :]
         scatter_ppm = scatter_ppm[chosen]
@@ -418,14 +425,20 @@ def cmd_run(args):
           from .annotate import (make_finder_chart, write_region_file,
                                  save_reference_frame)
           rdata, rhdr, rpos, (r_ap, r_in, r_out) = ref_snapshot
+          # rpos was captured for the full candidate pool; comps has since
+          # been cut to the steadiest few, so keep only their positions.
+          comp_pos = rpos[1:]
+          if kept_idx is not None and len(comp_pos) > len(comps):
+              comp_pos = [comp_pos[i] for i in kept_idx if i < len(comp_pos)]
+          comp_pos = comp_pos[:len(comps)]
           labels = [f"C{i+1} G={c.mag:.1f}" for i, c in enumerate(comps)]
           base = Path(args.out).with_suffix("")
-          chart = make_finder_chart(rdata, rpos[0], rpos[1:], r_ap, r_in, r_out,
+          chart = make_finder_chart(rdata, rpos[0], comp_pos, r_ap, r_in, r_out,
                                     out=base.with_name(base.name + "_finder.png"),
                                     comp_labels=labels,
                                     title=f"Aperture placement — RA {args.ra} Dec {args.dec}")
           reg = write_region_file(base.with_name(base.name + "_apertures.reg"),
-                                  rpos[0], rpos[1:], r_ap, r_in, r_out,
+                                  rpos[0], comp_pos, r_ap, r_in, r_out,
                                   comp_labels=[f"C{i+1}" for i in range(len(comps))])
           ref = save_reference_frame(rdata, rhdr,
                                      base.with_name(base.name + "_reference.fits"))
@@ -475,10 +488,19 @@ def cmd_run(args):
         elif args.detrend_airmass:
             print("  airmass detrending needs --lat/--lon; skipped")
 
+        flip_bjd = None
+        if args.lat is not None and args.lon is not None:
+            from .timing import meridian_crossing, jd_utc_to_bjd_tdb
+            mj = meridian_crossing(times, args.ra, args.lat, args.lon)
+            if mj is not None:
+                flip_bjd = float(jd_utc_to_bjd_tdb(
+                    np.array([mj]), args.ra, args.dec,
+                    args.lat, args.lon, args.elevation)[0])
+
         res = fit_transit(
             bjd, norm, err,
             fix_duration=args.fix_duration,
-            airmass=air,
+            airmass=air, flip_bjd=flip_bjd,
             expected_mid=args.predicted_mid,
             expected_duration_hours=args.duration_hours,
             expected_depth=(args.depth_ppm / 1e6) if args.depth_ppm else None,
@@ -489,6 +511,9 @@ def cmd_run(args):
         print(f"  depth        {res.depth_ppm:.0f} ± {res.depth_err*1e6:.0f} ppm")
         print(f"  duration     {res.duration_days*24:.2f} h")
         print(f"  residual RMS {res.rms_ppm:.0f} ppm")
+        if getattr(res, "flip_step", 0.0):
+            print(f"  meridian flip step {res.flip_step*1e6:+.0f} ppm "
+                  f"(field lands on different pixels after the flip)")
         if air is not None:
             if res.baseline_model == "airmass":
                 print(f"  baseline     airmass model, k = "

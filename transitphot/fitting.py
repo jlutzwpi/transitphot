@@ -35,6 +35,7 @@ class TransitFit:
     baseline_slope: float
     baseline_curve: float
     k_extinction: float
+    flip_step: float
     baseline_model: str
     rms_ppm: float
     n_points: int
@@ -49,7 +50,7 @@ class TransitFit:
 
 
 def trapezoid(t, mid, depth, duration, ingress, base, slope, curve=0.0,
-              k_ext=0.0, airmass=None):
+              k_ext=0.0, airmass=None, flip_step=0.0, after_flip=None):
     """
     Trapezoidal transit multiplied by a quadratic baseline.
 
@@ -72,6 +73,13 @@ def trapezoid(t, mid, depth, duration, ingress, base, slope, curve=0.0,
     frac = (half_total - np.abs(dt)) / ingress
     f = np.where(ramp, 1.0 - depth * np.clip(frac, 0, 1), f)
     cont = base + slope * dt + curve * dt ** 2
+    if after_flip is not None and flip_step:
+        # A meridian flip rotates the field 180 degrees, so every star lands
+        # on different pixels with their own response, dust and vignetting.
+        # Flat-fielding removes most of that and never all of it, and what
+        # remains is a constant step between the two halves of the night.
+        # Left unmodeled it is absorbed by the transit parameters.
+        cont = cont * np.where(after_flip, 1.0 + flip_step, 1.0)
     if airmass is not None and k_ext:
         X = np.asarray(airmass, dtype=float)
         cont = cont * np.exp(-k_ext * (X - np.nanmedian(X)))
@@ -83,7 +91,8 @@ def fit(bjd: np.ndarray, flux: np.ndarray, flux_err: np.ndarray | None = None,
         expected_duration_hours: float | None = None,
         expected_depth: float | None = None,
         fix_duration: bool = False,
-        airmass: np.ndarray | None = None) -> TransitFit:
+        airmass: np.ndarray | None = None,
+        flip_bjd: float | None = None) -> TransitFit:
     """
     Fit the trapezoid model. Priors from TransitPlanner's prediction make the
     fit far more stable on marginal data — pass them when you have them.
@@ -139,6 +148,14 @@ def fit(bjd: np.ndarray, flux: np.ndarray, flux_err: np.ndarray | None = None,
     # prefers — decided below by BIC, which penalizes the extra parameter.
     air_full = (np.asarray(airmass, dtype=float)[good]
                 if airmass is not None else None)
+
+    # Only worth a parameter if the flip actually falls inside the series
+    # with frames on both sides of it.
+    after_flip = None
+    if flip_bjd is not None:
+        m = np.asarray(bjd, dtype=float)[good] > float(flip_bjd)
+        if 5 <= int(m.sum()) <= len(m) - 5:
+            after_flip = m
     air = None
     use_air = False
     if fix_duration and expected_duration_hours:
@@ -155,18 +172,27 @@ def fit(bjd: np.ndarray, flux: np.ndarray, flux_err: np.ndarray | None = None,
         use_air = use_airmass
         air = air_full if use_airmass else None
         _lo, _hi = list(lo), list(hi)
+        n_base = len(_lo)
         if use_airmass:
             _lo[6], _hi[6] = -1e-9, 1e-9      # curvature off, airmass instead
             _lo, _hi = _lo + [-0.5], _hi + [0.5]
+        if after_flip is not None:
+            _lo, _hi = _lo + [-0.05], _hi + [0.05]
         _best, _cov, _chi2 = None, None, np.inf
         for m in starts:
             mm = float(np.clip(m, _lo[0] + 1e-6, _hi[0] - 1e-6))
             p0 = [mm, dep0, dur0, dur0 * 0.12, 1.0, 0.0, 0.0]
             if use_airmass:
                 p0 = p0 + [0.0]
+            if after_flip is not None:
+                p0 = p0 + [0.0]
             p0 = [float(np.clip(v, a, b)) for v, a, b in zip(p0, _lo, _hi)]
-            fn = ((lambda tt, *pp: trapezoid(tt, *pp, airmass=air))
-                  if use_airmass else trapezoid)
+            def fn(tt, *pp, _air=air, _flip=after_flip, _ua=use_airmass):
+                pp = list(pp)
+                step = pp.pop() if _flip is not None else 0.0
+                k = pp.pop() if _ua else 0.0
+                return trapezoid(tt, *pp, k_ext=k, airmass=_air,
+                                 flip_step=step, after_flip=_flip)
             try:
                 popt, pcov = curve_fit(fn, x, flux, p0=p0, bounds=(_lo, _hi),
                                        sigma=sigma,
@@ -208,15 +234,25 @@ def fit(bjd: np.ndarray, flux: np.ndarray, flux_err: np.ndarray | None = None,
     # robust solution and clipping the points it flagged as outliers, and
     # take the errors from that. This separates the two jobs: robustness for
     # the values, standard statistics for the error bars.
-    model_fn = ((lambda tt, *pp: trapezoid(tt, *pp, airmass=air))
-                if use_air else trapezoid)
+    def model_fn(tt, *pp, _air=air, _flip=after_flip, _ua=use_air):
+        pp = list(pp)
+        step = pp.pop() if _flip is not None else 0.0
+        k = pp.pop() if _ua else 0.0
+        return trapezoid(tt, *pp, k_ext=k, airmass=_air,
+                         flip_step=step, after_flip=_flip)
     resid_r = flux - model_fn(x, *best)
     best_resid = resid_r
     s = 1.4826 * np.median(np.abs(resid_r - np.median(resid_r)))
     inl = np.abs(resid_r) < 4 * s if s > 0 else np.ones(len(x), bool)
     try:
-        ls_fn = ((lambda tt, *pp: trapezoid(tt, *pp, airmass=air[inl]))
-                 if use_air else trapezoid)
+        def ls_fn(tt, *pp, _air=(air[inl] if air is not None else None),
+                  _flip=(after_flip[inl] if after_flip is not None else None),
+                  _ua=use_air):
+            pp = list(pp)
+            step = pp.pop() if _flip is not None else 0.0
+            k = pp.pop() if _ua else 0.0
+            return trapezoid(tt, *pp, k_ext=k, airmass=_air,
+                             flip_step=step, after_flip=_flip)
         _, cov_ls = curve_fit(
             ls_fn, x[inl], flux[inl], p0=best, bounds=(lo, hi),
             sigma=(sigma[inl] if sigma is not None else None),
@@ -235,6 +271,7 @@ def fit(bjd: np.ndarray, flux: np.ndarray, flux_err: np.ndarray | None = None,
         duration_days=float(best[2]), ingress_days=float(best[3]),
         baseline_slope=float(best[5]), baseline_curve=float(best[6]),
         k_extinction=float(best[7]) if use_air else 0.0,
+        flip_step=float(best[-1]) if after_flip is not None else 0.0,
         baseline_model=baseline_model,
         rms_ppm=float(np.std(best_resid) * 1e6), n_points=len(x),
     )
