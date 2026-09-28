@@ -44,6 +44,7 @@ class LimbDarkFit:
     central_depth_ppm: float     # the observed dip at mid-transit
     duration_hours: float
     rms_ppm: float
+    baseline_flux: float
     n_points: int
     u1: float
     u2: float
@@ -181,7 +182,8 @@ def fit(bjd, flux, flux_err=None, *, period: float,
         depth_ppm=float(depth * 1e6), depth_err_ppm=float(depth_err * 1e6),
         central_depth_ppm=float(central * 1e6),
         duration_hours=transit_duration_hours(period, rp, a, inc),
-        rms_ppm=float(np.std(resid) * 1e6), n_points=len(bjd),
+        rms_ppm=float(np.std(resid) * 1e6),
+        baseline_flux=float(popt[4]), n_points=len(bjd),
         u1=u1, u2=u2,
     )
 

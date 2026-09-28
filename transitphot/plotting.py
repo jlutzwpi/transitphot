@@ -65,10 +65,24 @@ def plot_lightcurve(bjd, flux, flux_err=None, fit_result=None,
 
     fine = np.linspace(bjd.min(), bjd.max(), 800)
     if has_fit:
-        model = trapezoid(fine, fit_result.mid_bjd, fit_result.depth,
-                          fit_result.duration_days, fit_result.ingress_days,
-                          1.0, fit_result.baseline_slope,
-                          fit_result.baseline_curve)
+        # Draw the model that was actually fitted, step and all. A
+        # continuous curve over a discontinuous fit makes good data look
+        # offset and puts a false structure in the residuals.
+        def _model(tt):
+            step = getattr(fit_result, "flip_step", 0.0)
+            fb = getattr(fit_result, "flip_bjd", None)
+            mask = (np.asarray(tt) > fb) if (fb and step) else None
+            # the fitted baseline level, not 1.0: the curve is normalized
+            # to its own median, which is not where the fit put the continuum
+            return trapezoid(tt, fit_result.mid_bjd, fit_result.depth,
+                             fit_result.duration_days,
+                             fit_result.ingress_days,
+                             getattr(fit_result, "baseline_flux", 1.0),
+                             fit_result.baseline_slope,
+                             fit_result.baseline_curve,
+                             flip_step=step, after_flip=mask)
+
+        model = _model(fine)
         ax.plot((fine - t0) * 24.0, model, "-", lw=1.8, color="#c1121f",
                 label="trapezoid fit")
         ax.axvline((fit_result.mid_bjd - t0) * 24.0, ls="--", lw=1,
@@ -79,7 +93,8 @@ def plot_lightcurve(bjd, flux, flux_err=None, fit_result=None,
     # ingress and egress, which is exactly where the mid-time comes from.
     if ld_fit is not None and period:
         from .limbdark import model_curve
-        ld_model = model_curve(fine, ld_fit, period)
+        ld_model = model_curve(fine, ld_fit, period,
+                               base=getattr(ld_fit, "baseline_flux", 1.0))
         ax.plot((fine - t0) * 24.0, ld_model, "-", lw=1.8, color="#2a6f97",
                 label="limb-darkened fit")
         ax.axvline((ld_fit.mid_bjd - t0) * 24.0, ls="--", lw=1,
@@ -91,16 +106,13 @@ def plot_lightcurve(bjd, flux, flux_err=None, fit_result=None,
     ax.grid(alpha=0.15)
 
     if has_fit:
-        resid = flux - trapezoid(bjd, fit_result.mid_bjd, fit_result.depth,
-                                 fit_result.duration_days,
-                                 fit_result.ingress_days, 1.0,
-                                 fit_result.baseline_slope,
-                                 fit_result.baseline_curve)
+        resid = flux - _model(bjd)
         axes[1].plot(x, resid * 1e6, ".", ms=3, color="#c1121f", alpha=0.55,
                      label="trapezoid")
         if ld_fit is not None and period:
             from .limbdark import model_curve as _mc
-            ld_resid = flux - _mc(bjd, ld_fit, period)
+            ld_resid = flux - _mc(bjd, ld_fit, period,
+                                  base=getattr(ld_fit, "baseline_flux", 1.0))
             axes[1].plot(x, ld_resid * 1e6, ".", ms=3, color="#2a6f97",
                          alpha=0.55, label="limb-darkened")
             axes[1].legend(frameon=False, fontsize=8, ncol=2, loc="upper right")

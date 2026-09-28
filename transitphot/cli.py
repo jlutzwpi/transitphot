@@ -292,29 +292,119 @@ def cmd_run(args):
     # comparisons are (presumed) constant stars, so whichever aperture makes
     # them most stable is the one measuring flux best — and choosing on the
     # comparisons rather than the target avoids biasing the transit itself.
+    # Predicted mid-time from the archive ephemeris, for whichever transit
+    # this session actually covers.
+    if args.epoch_bjd and args.period_days and not args.predicted_mid:
+        center = float(np.median(times))
+        n = round((center - args.epoch_bjd) / args.period_days)
+        args.predicted_mid = args.epoch_bjd + n * args.period_days
+        args.pred_system = "bjd_tdb"
+        print(f"Predicted mid-transit from ephemeris (epoch + {n} x period): "
+              f"{args.predicted_mid:.5f} BJD_TDB")
+
+    # the flip time, so the scan can allow for the step rather than count
+    # it as noise
+    flip_for_scan = None
+
+    # timestamps for the scan's out-of-transit window
+    from .timing import jd_utc_to_bjd_tdb as _to_bjd
+    try:
+        bjd_all = _to_bjd(np.asarray(times), args.ra, args.dec,
+                          args.lat, args.lon, args.elevation) \
+            if args.lat is not None else np.asarray(times)
+    except Exception:                                # noqa: BLE001
+        bjd_all = np.asarray(times)
+
+    if args.lat is not None and args.lon is not None:
+        try:
+            from .timing import meridian_crossing as _mc
+            _m = _mc(times, args.ra, args.lat, args.lon)
+            if _m is not None:
+                flip_for_scan = float(_to_bjd(
+                    np.array([_m]), args.ra, args.dec,
+                    args.lat, args.lon, args.elevation)[0])
+        except Exception:                                # noqa: BLE001
+            pass
+
     if len(RADII) > 1:
-        print("Aperture scan (median comparison-star scatter):")
-        best_i, best_med = 0, np.inf
+        # Score each aperture on the thing we actually measure: the scatter
+        # of the target's differential light curve outside transit.
+        # Comparison-star scatter alone keeps falling as the aperture grows,
+        # because a wider circle averages over more pixels — but that says
+        # nothing about the target, and on real data the wider aperture has
+        # produced a WORSE fit while looking better by that metric.
+        oot = None
+        if args.predicted_mid and args.duration_hours:
+            half = args.duration_hours / 48.0
+            oot = np.abs(bjd_all - args.predicted_mid) > half * 1.15
+            if oot.sum() < 15:
+                oot = None
+        print("Aperture scan"
+              + (" (target scatter outside transit):" if oot is not None
+                 else " (median comparison-star scatter):"))
+
+        meds = []
         for i, r in enumerate(RADII):
             sc = cs.stability_report(cflux[:, i, :].T)
-            # Median over the best n_comps only. With a pool twice that size,
-            # a few poor candidates drag the median around and can move the
-            # chosen aperture — the scan should reflect the stars that will
-            # actually be used.
             good = np.sort(sc[np.isfinite(sc)])[:args.n_comps]
-            med = float(np.median(good)) if good.size else float("nan")
-            if med < best_med:
-                best_i, best_med = i, med
-            print(f"  {r:5.1f} px  {med:8.0f} ppm")
-        # A minimum at the edge of the ladder is not a minimum — scatter may
-        # still be falling beyond it. Say so, because the chosen aperture is
-        # then a limit of the search rather than a property of the data.
-        if best_i == len(RADII) - 1:
-            print(f"  NOTE: the best aperture is the largest tried. Scatter "
-                  f"may still be improving — re-run with "
-                  f"--aperture-scale {RADII[-1] / fwhm * 1.3:.1f} or larger, "
-                  f"or --max-aperture-scale to widen the scan.")
-        elif best_i == 0:
+            comp_med = float(np.median(good)) if good.size else float("nan")
+
+            if oot is not None:
+                w = ph.weights_from_scatter(sc)
+                ens = np.nansum(cflux[:, i, :].T * w[:, None], axis=0)
+                with np.errstate(invalid="ignore", divide="ignore"):
+                    rel = tflux[:, i] / ens
+                # Measure scatter ABOUT a baseline, not around a constant.
+                # A drift across the session, and especially the step at a
+                # meridian flip, are not noise — and a wide aperture averages
+                # over enough sensor to wash the step out, which made it look
+                # quieter here while fitting the transit worse.
+                tt = bjd_all[oot]
+                rel = rel[oot]
+                ok = np.isfinite(rel) & np.isfinite(tt)
+                tt, rel = tt[ok], rel[ok]
+                if rel.size >= 10:
+                    cols = [np.ones_like(tt), tt - np.mean(tt)]
+                    if flip_for_scan is not None:
+                        step = (tt > flip_for_scan).astype(float)
+                        if 3 <= step.sum() <= len(tt) - 3:
+                            cols.append(step)
+                    A = np.vstack(cols).T
+                    try:
+                        coef, *_ = np.linalg.lstsq(A, rel, rcond=None)
+                        resid = rel - A @ coef
+                    except np.linalg.LinAlgError:
+                        resid = rel - np.median(rel)
+                    m = np.median(rel)
+                    score = 1.4826 * np.median(np.abs(resid)) / m * 1e6
+                else:
+                    score = comp_med
+            else:
+                score = comp_med
+            meds.append(score)
+            print(f"  {r:5.1f} px  {score:8.0f} ppm")
+
+        meds = np.asarray(meds, dtype=float)
+        finite = np.isfinite(meds)
+        best_i = int(np.nanargmin(np.where(finite, meds, np.inf)))
+
+        # Prefer the smallest aperture within a few percent of the best: the
+        # extra area of a wider one is mostly sky, and a large circle is more
+        # exposed to neighbors, gradients and flat-field error.
+        TOL = 0.05
+        within = np.flatnonzero(finite & (meds <= meds[best_i] * (1.0 + TOL)))
+        if within.size and int(within[0]) != best_i:
+            print(f"  {RADII[int(within[0])]:.1f} px is within {TOL:.0%} of the "
+                  f"minimum at {RADII[best_i]:.1f} px; taking the smaller one.")
+            best_i = int(within[0])
+
+        # A minimum at the edge of the ladder is only worth reporting when
+        # the scan is still improving materially there.
+        if best_i == len(RADII) - 1 and meds[-1] < meds[-2] * (1.0 - TOL):
+            print(f"  NOTE: the best aperture is the largest tried and still "
+                  f"improving — re-run with --max-aperture-scale "
+                  f"{RADII[-1] / fwhm * 1.3:.1f} or larger.")
+        elif best_i == 0 and len(meds) > 1 and meds[0] < meds[1] * (1.0 - TOL):
             print("  NOTE: the best aperture is the smallest tried; the "
                   "optimum may be narrower still.")
         print(f"  -> using {RADII[best_i]:.1f} px")
@@ -450,15 +540,6 @@ def cmd_run(args):
               f"({type(exc).__name__}: {exc}). "
               f"The light curve, fit and AAVSO report are unaffected.")
 
-    # Predicted mid-time from the archive ephemeris, for whichever transit
-    # this session actually covers.
-    if args.epoch_bjd and args.period_days and not args.predicted_mid:
-        center = float(np.median(times))
-        n = round((center - args.epoch_bjd) / args.period_days)
-        args.predicted_mid = args.epoch_bjd + n * args.period_days
-        args.pred_system = "bjd_tdb"
-        print(f"Predicted mid-transit from ephemeris (epoch + {n} x period): "
-              f"{args.predicted_mid:.5f} BJD_TDB")
 
     # --- BJD_TDB ---
     if args.lat is not None and args.lon is not None:

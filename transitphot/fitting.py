@@ -32,10 +32,12 @@ class TransitFit:
     depth_err: float
     duration_days: float
     ingress_days: float
+    baseline_flux: float
     baseline_slope: float
     baseline_curve: float
     k_extinction: float
     flip_step: float
+    flip_bjd: float | None
     baseline_model: str
     rms_ppm: float
     n_points: int
@@ -188,11 +190,7 @@ def fit(bjd: np.ndarray, flux: np.ndarray, flux_err: np.ndarray | None = None,
                 p0 = p0 + [0.0]
             p0 = [float(np.clip(v, a, b)) for v, a, b in zip(p0, _lo, _hi)]
             def fn(tt, *pp, _air=air, _flip=after_flip, _ua=use_airmass):
-                pp = list(pp)
-                step = pp.pop() if _flip is not None else 0.0
-                k = pp.pop() if _ua else 0.0
-                return trapezoid(tt, *pp, k_ext=k, airmass=_air,
-                                 flip_step=step, after_flip=_flip)
+                return _evaluate(tt, pp, _ua, _air, _flip)
             try:
                 popt, pcov = curve_fit(fn, x, flux, p0=p0, bounds=(_lo, _hi),
                                        sigma=sigma,
@@ -207,18 +205,36 @@ def fit(bjd: np.ndarray, flux: np.ndarray, flux_err: np.ndarray | None = None,
                 _best, _cov, _chi2 = popt, pcov, c2
         return _best, _cov, _chi2, _lo, _hi
 
+
+    def _evaluate(tt, params, use_airmass, air_vec, flip_vec):
+        """
+        Apply a parameter vector to the model.
+
+        The vector grows at the end: the airmass coefficient, then the flip
+        step, each present only when that term is in use. Spreading it
+        positionally into trapezoid() puts those extras into the wrong
+        arguments, so unpack them here and nowhere else.
+        """
+        pp = list(params)
+        step = pp.pop() if flip_vec is not None else 0.0
+        k = pp.pop() if use_airmass else 0.0
+        return trapezoid(tt, *pp, k_ext=k, airmass=air_vec,
+                         flip_step=step, after_flip=flip_vec)
+
     n = len(x)
     cand = []
     b_poly = _search(False)
     if b_poly[0] is not None:
-        rss = np.sum((flux - trapezoid(x, *b_poly[0])) ** 2)
+        rss = np.sum((flux - _evaluate(x, b_poly[0], False, None,
+                                       after_flip)) ** 2)
         bic = n * np.log(rss / n) + len(b_poly[0]) * np.log(n)
         cand.append(("polynomial", b_poly, bic))
     if air_full is not None:
         b_air = _search(True)
         if b_air[0] is not None:
             air = air_full
-            rss = np.sum((flux - trapezoid(x, *b_air[0], airmass=air_full)) ** 2)
+            rss = np.sum((flux - _evaluate(x, b_air[0], True, air_full,
+                                           after_flip)) ** 2)
             bic = n * np.log(rss / n) + len(b_air[0]) * np.log(n)
             cand.append(("airmass", b_air, bic))
     if not cand:
@@ -235,11 +251,7 @@ def fit(bjd: np.ndarray, flux: np.ndarray, flux_err: np.ndarray | None = None,
     # take the errors from that. This separates the two jobs: robustness for
     # the values, standard statistics for the error bars.
     def model_fn(tt, *pp, _air=air, _flip=after_flip, _ua=use_air):
-        pp = list(pp)
-        step = pp.pop() if _flip is not None else 0.0
-        k = pp.pop() if _ua else 0.0
-        return trapezoid(tt, *pp, k_ext=k, airmass=_air,
-                         flip_step=step, after_flip=_flip)
+        return _evaluate(tt, pp, _ua, _air, _flip)
     resid_r = flux - model_fn(x, *best)
     best_resid = resid_r
     s = 1.4826 * np.median(np.abs(resid_r - np.median(resid_r)))
@@ -248,11 +260,7 @@ def fit(bjd: np.ndarray, flux: np.ndarray, flux_err: np.ndarray | None = None,
         def ls_fn(tt, *pp, _air=(air[inl] if air is not None else None),
                   _flip=(after_flip[inl] if after_flip is not None else None),
                   _ua=use_air):
-            pp = list(pp)
-            step = pp.pop() if _flip is not None else 0.0
-            k = pp.pop() if _ua else 0.0
-            return trapezoid(tt, *pp, k_ext=k, airmass=_air,
-                             flip_step=step, after_flip=_flip)
+            return _evaluate(tt, pp, _ua, _air, _flip)
         _, cov_ls = curve_fit(
             ls_fn, x[inl], flux[inl], p0=best, bounds=(lo, hi),
             sigma=(sigma[inl] if sigma is not None else None),
@@ -263,15 +271,18 @@ def fit(bjd: np.ndarray, flux: np.ndarray, flux_err: np.ndarray | None = None,
 
     span_days = float(x.max() - x.min())
     if not np.all(np.isfinite(perr)) or perr[0] > span_days:
-        perr = _bootstrap_errors(x, flux, best, lo, hi, sigma)
+        perr = _bootstrap_errors(x, flux, best, lo, hi, sigma,
+                                 model_fn=model_fn)
 
     return TransitFit(
         mid_bjd=float(best[0]) + origin, mid_err_days=float(perr[0]),
         depth=float(best[1]), depth_err=float(perr[1]),
         duration_days=float(best[2]), ingress_days=float(best[3]),
+        baseline_flux=float(best[4]),
         baseline_slope=float(best[5]), baseline_curve=float(best[6]),
         k_extinction=float(best[7]) if use_air else 0.0,
         flip_step=float(best[-1]) if after_flip is not None else 0.0,
+        flip_bjd=(float(flip_bjd) if after_flip is not None else None),
         baseline_model=baseline_model,
         rms_ppm=float(np.std(best_resid) * 1e6), n_points=len(x),
     )
@@ -284,20 +295,24 @@ def o_minus_c_minutes(observed_mid_bjd: float, predicted_mid_bjd: float
     return (observed_mid_bjd - predicted_mid_bjd) * 24 * 60
 
 
-def _bootstrap_errors(x, flux, popt, lo, hi, sigma, n_boot: int = 24):
+def _bootstrap_errors(x, flux, popt, lo, hi, sigma, n_boot: int = 24,
+                      model_fn=None):
     """
     Residual bootstrap: refit repeatedly on resampled residuals and take the
     scatter of the recovered parameters. Slower than reading the covariance
     matrix, but it reports what the data actually constrain.
     """
     rng = np.random.default_rng(12345)
-    model = trapezoid(x, *popt)
+    # The parameter vector may carry an airmass coefficient and a flip step
+    # beyond trapezoid's own arguments, so the caller supplies the evaluator.
+    fn = model_fn if model_fn is not None else (lambda tt, *pp: trapezoid(tt, *pp))
+    model = fn(x, *popt)
     resid = flux - model
     draws = []
     for _ in range(n_boot):
         sample = model + rng.choice(resid, size=len(resid), replace=True)
         try:
-            p, _ = curve_fit(trapezoid, x, sample, p0=popt, bounds=(lo, hi),
+            p, _ = curve_fit(fn, x, sample, p0=popt, bounds=(lo, hi),
                              sigma=sigma, loss="soft_l1", f_scale=0.01,
                              maxfev=20000)
             draws.append(p)
