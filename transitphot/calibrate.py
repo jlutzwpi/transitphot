@@ -37,6 +37,27 @@ def _combine(paths: list[Path], unit: str = "adu", method: str = "median",
     return ccdproc.combine(frames, **combiner_kw)
 
 
+def _for_write(ccd: CCDData) -> CCDData:
+    """
+    Trim a CCDData down to what's worth putting on disk.
+
+    ccdproc attaches a per-pixel MASK and UNCERT extension to every combined
+    or calibrated frame, and nothing in this codebase ever reads either one
+    back — they're dead weight that roughly doubled every calibrated file.
+    Drop them, and store the data as float32 rather than ccdproc's default
+    float64: plenty of precision for ADU-range counts, and it halves the
+    size again. Together this takes a calibrated frame from ~8.5x the raw
+    file down to ~2x, which is what actually filled the disk in the first
+    place. The source `ccd` is left untouched so later steps that still use
+    it (e.g. applying a master to every light) keep full precision.
+    """
+    out = ccd.copy()
+    out.uncertainty = None
+    out.mask = None
+    out.data = out.data.astype(np.float32, copy=False)
+    return out
+
+
 def make_master_bias(bias_dir: Path, out: Path | None = None) -> CCDData:
     paths = fits_files(bias_dir)
     if not paths:
@@ -45,7 +66,7 @@ def make_master_bias(bias_dir: Path, out: Path | None = None) -> CCDData:
     master.meta["IMAGETYP"] = "MASTER BIAS"
     master.meta["NCOMBINE"] = len(paths)
     if out:
-        master.write(out, overwrite=True)
+        _for_write(master).write(out, overwrite=True)
     return master
 
 
@@ -60,7 +81,7 @@ def make_master_dark(dark_dir: Path, master_bias: CCDData | None = None,
     master.meta["IMAGETYP"] = "MASTER DARK"
     master.meta["NCOMBINE"] = len(paths)
     if out:
-        master.write(out, overwrite=True)
+        _for_write(master).write(out, overwrite=True)
     return master
 
 
@@ -183,7 +204,7 @@ def make_master_flat(flat_dir: Path, master_bias: CCDData | None = None,
     master.meta["IMAGETYP"] = "MASTER FLAT"
     master.meta["NCOMBINE"] = len(paths)
     if out:
-        master.write(out, overwrite=True)
+        _for_write(master).write(out, overwrite=True)
     return master
 
 
@@ -295,7 +316,7 @@ def calibrate_night(lights_dir: Path, bias_dir: Path | None = None,
     written = []
     lights = fits_files(lights_dir)
     for i, p in enumerate(lights):
-        cal = calibrate_light(p, mb, md, mf, scale_dark=scale_dark)
+        cal = _for_write(calibrate_light(p, mb, md, mf, scale_dark=scale_dark))
         dest = out_dir / f"cal_{p.name}"
         # Checked with the real, already-computed frame size, against how
         # many frames are left — so a doomed run stops on the first frame
