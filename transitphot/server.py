@@ -93,6 +93,10 @@ PAGE = """<!DOCTYPE html>
 <fieldset><legend>Send a sequence to N.I.N.A.</legend>
   <label for="seqfile">Sequence exported from TransitPlanner</label>
   <input id="seqfile" type="file" accept=".json,application/json">
+  <label for="nina_api">N.I.N.A. address (Advanced API)</label>
+  <input id="nina_api" placeholder="http://192.168.86.246:1888">
+  <div class="hint">When set, processing starts the moment the sequence
+    finishes, and frames with poor focus or guiding are dropped.</div>
   <button type="button" id="uploadbtn" onclick="uploadSeq()">Send to N.I.N.A.</button>
   <div id="uploadmsg" class="hint"></div>
 
@@ -157,10 +161,6 @@ PAGE = """<!DOCTYPE html>
   </div>
   <div class="hint">Used to size the plate-solve search: 15.7 for APS-C,
     24 for full frame, 13.5 for a KAF-8300.</div>
-  <label for="nina_api">N.I.N.A. address (Advanced API)</label>
-  <input id="nina_api" placeholder="http://192.168.86.246:1888">
-  <div class="hint">When set, processing starts the moment the sequence
-    finishes, and frames with poor focus or guiding are dropped.</div>
   <div class="row">
     <div><label for="aavso_obscode">AAVSO observer code</label><input id="aavso_obscode"></div>
     <div><label for="aavso_filter">AAVSO filter</label><input id="aavso_filter" placeholder="auto"></div>

@@ -62,6 +62,27 @@ def cmd_run(args):
               f"(e.g. {strays[0].name})")
     print(f"{len(paths)} frames")
 
+    # The frames know which filter they were taken through. A mismatch with
+    # the command line is easy to make when switching targets, and it is not
+    # cosmetic: the filter sets the color tolerance for matching comparison
+    # stars, and it is what the AAVSO report declares.
+    hdr_filter, mixed_filters = ph.session_filter(paths)
+    if hdr_filter:
+        if mixed_filters:
+            print(f"WARNING: the frames use more than one filter "
+                  f"(mostly {hdr_filter}). A band change mid-series puts a "
+                  f"step in the light curve — check the session.")
+        if not args.filter_band:
+            args.filter_band = hdr_filter
+            print(f"Filter {hdr_filter} (from the frame headers)")
+        elif args.filter_band.strip().upper() != hdr_filter.strip().upper():
+            print(f"WARNING: --filter says {args.filter_band} but the frames "
+                  f"were taken through {hdr_filter}. Using {hdr_filter}; pass "
+                  f"--filter {hdr_filter} to silence this, or --force-filter "
+                  f"to override the headers.")
+            if not getattr(args, "force_filter", False):
+                args.filter_band = hdr_filter
+
     # Focus and guiding problems from N.I.N.A.'s own per-frame records,
     # saved by `night --nina-api`. Catches failure modes that comparison-star
     # flux does not: a guiding glitch or focus drift leaves the ensemble
@@ -120,7 +141,8 @@ def cmd_run(args):
     # which ones ARE. On KELT-16 b, stars scoring better on magnitude and
     # color matching measured three times noisier than the ones they
     # displaced, and the fitted mid-time moved 17 minutes as a result.
-    pool_n = max(args.n_comps * 2, args.n_comps + 4)
+    pool_n = args.pool if args.pool else max(args.n_comps * 4,
+                                             args.n_comps + 15)
     comps = cs.select(args.ra, args.dec, args.target_mag, field,
                       n=pool_n, filter_band=args.filter_band,
                       target_color=tcol, variables=variables,
@@ -455,17 +477,28 @@ def cmd_run(args):
     scatter_ppm = cs.stability_report(cflux)
     kept_idx = None
 
-    # Keep the steadiest n_comps of the pool, measured on these frames.
-    if len(comps) > args.n_comps:
+    # Choose the SET that produces the cleanest curve, not the stars that
+    # look steadiest individually. Comparison stars share systematics, so
+    # the best combination is not simply the best members.
+    if len(comps) > args.n_comps and oot is not None:
+        # tflux and cflux have already been reduced to the chosen aperture
+        sel = cs.choose_ensemble(tflux, cflux, oot,
+                                 max_n=max(args.n_comps, 3))
+        if len(sel) >= 3:
+            dropped = [c for i, c in enumerate(comps) if i not in sel]
+            if dropped:
+                print(f"Set aside {len(dropped)} candidate(s) the ensemble "
+                      f"search did not want")
+            kept_idx = [int(pool_map[i]) for i in sel]
+            comps = [comps[i] for i in sel]
+            cflux = cflux[sel, :]
+            scatter_ppm = scatter_ppm[sel]
+    elif len(comps) > args.n_comps:
         order = np.argsort(np.where(np.isfinite(scatter_ppm),
                                     scatter_ppm, np.inf))
         chosen = np.sort(order[:args.n_comps])
-        dropped = [comps[i] for i in order[args.n_comps:]]
-        print(f"Measured {len(comps)} candidates; keeping the {args.n_comps} "
-              f"steadiest:")
-        for c in dropped:
-            i = comps.index(c)
-            print(f"  set aside G={c.mag:.2f}  {scatter_ppm[i]:7.0f} ppm")
+        print(f"Measured {len(comps)} candidates; keeping the "
+              f"{args.n_comps} steadiest")
         kept_idx = [int(pool_map[i]) for i in chosen]
         comps = [comps[i] for i in chosen]
         cflux = cflux[chosen, :]
@@ -764,7 +797,9 @@ def cmd_run(args):
                     filter_code=filt, binning=args.binning,
                     ra=f"{args.ra:.6f}", dec=f"{args.dec:+.6f}",
                     priors=priors, results=results, notes=notes,
-                    airmass=air)
+                    airmass=air,
+                    meridian_flip=((bjd > flip_bjd).astype(int)
+                                   if flip_bjd else None))
                 print(f"  wrote {ap.name} (AAVSO Exoplanet Database report)")
             print(f"  wrote {base.with_suffix('.txt').name} and "
                   f"{base.name}_summary.json")
@@ -911,6 +946,11 @@ def main():
     r.add_argument("--radius", type=float, default=None,
                    help="comparison search radius in arcmin (default: the "
                         "frame's half-diagonal, read from its WCS)")
+    r.add_argument("--force-filter", action="store_true", dest="force_filter",
+                   help="trust --filter over the FILTER keyword in the frames")
+    r.add_argument("--pool", type=int,
+                   help="how many comparison candidates to measure "
+                        "before choosing an ensemble (default ~20)")
     r.add_argument("--n-comps", type=int, default=5)
     r.add_argument("--filter", dest="filter_band",
                    help="filter used (R, L, V...) — relaxes the color match "

@@ -28,6 +28,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from pathlib import Path
+
 import numpy as np
 from astropy import units as u
 from astropy.coordinates import SkyCoord
@@ -45,9 +47,126 @@ class CompCandidate:
     reasons: list[str]
 
 
+CACHE_DIR = Path.home() / ".transitphot" / "gaia"
+
+
+def _cache_path(ra_deg, dec_deg, radius_arcmin, mag_limit) -> Path:
+    # n/s for the declination sign, so the filename reads the way a human
+    # expects; "p" stands in for the decimal point only.
+    sign = "n" if dec_deg >= 0 else "s"
+    key = (f"ra{ra_deg:.4f}_dec{sign}{abs(dec_deg):.4f}"
+           f"_r{radius_arcmin:.1f}_g{mag_limit:.1f}")
+    return CACHE_DIR / (key.replace(".", "p") + ".ecsv")
+
+
+def _with_timeout(fn, seconds: float):
+    """
+    Run fn() and give up after `seconds`.
+
+    A retry loop is useless against a call that never returns, and
+    astroquery's async TAP job has no timeout of its own: when ESA's archive
+    accepted the job and then stopped answering, this blocked for hours in
+    the middle of an unattended run.
+
+    The worker is a daemon thread, so an abandoned query cannot keep the
+    process alive. Returns (value, None) or (None, error).
+    """
+    import threading
+
+    box = {}
+
+    def work():
+        try:
+            box["value"] = fn()
+        except BaseException as exc:                     # noqa: BLE001
+            box["error"] = exc
+
+    t = threading.Thread(target=work, daemon=True)
+    t.start()
+    t.join(seconds)
+    if t.is_alive():
+        return None, TimeoutError(f"no answer after {seconds:.0f}s")
+    return box.get("value"), box.get("error")
+
+
+
+def _query_vizier_gaia(ra_deg, dec_deg, radius_arcmin, mag_limit):
+    """
+    The same Gaia DR3 catalog, served by CDS instead of ESA.
+
+    Different organization, different infrastructure: when ESA's archive is
+    down — as it was, with a 500, in the middle of an unattended night — CDS
+    is usually still answering. VizieR names the columns differently, so map
+    them onto what the rest of this module expects.
+
+    Returns None rather than raising, so the caller can fall through.
+    """
+    try:
+        from astroquery.vizier import Vizier
+        v = Vizier(columns=["Source", "RA_ICRS", "DE_ICRS", "Gmag", "BP-RP",
+                            "RUWE", "VarFlag"],
+                   column_filters={"Gmag": f"<{mag_limit}"},
+                   row_limit=-1, timeout=120)
+        res = v.query_region(SkyCoord(ra_deg * u.deg, dec_deg * u.deg),
+                             radius=radius_arcmin * u.arcmin,
+                             catalog="I/355/gaiadr3")
+    except Exception:                                    # noqa: BLE001
+        return None
+    if not res or len(res[0]) == 0:
+        return None
+
+    t = res[0]
+    out = Table()
+    try:
+        out["source_id"] = t["Source"]
+        out["ra"] = np.asarray(t["RA_ICRS"], dtype=float)
+        out["dec"] = np.asarray(t["DE_ICRS"], dtype=float)
+        out["phot_g_mean_mag"] = np.asarray(t["Gmag"], dtype=float)
+        out["bp_rp"] = (np.asarray(t["BP-RP"], dtype=float)
+                        if "BP-RP" in t.colnames
+                        else np.full(len(t), np.nan))
+        out["ruwe"] = (np.asarray(t["RUWE"], dtype=float)
+                       if "RUWE" in t.colnames else np.zeros(len(t)))
+        # VizieR reports variability as a flag column when it reports it at
+        # all; anything we cannot read becomes NOT_AVAILABLE, which is how
+        # Gaia itself marks "not assessed".
+        if "VarFlag" in t.colnames:
+            out["phot_variable_flag"] = [str(x) for x in t["VarFlag"]]
+        else:
+            out["phot_variable_flag"] = ["NOT_AVAILABLE"] * len(t)
+    except Exception:                                    # noqa: BLE001
+        return None
+    return out
+
+
+
 def query_field(ra_deg: float, dec_deg: float, radius_arcmin: float = 20.0,
-                mag_limit: float = 16.0) -> Table:
-    """Fetch Gaia sources in the field. Requires network access."""
+                mag_limit: float = 16.0, attempts: int = 2,
+                use_cache: bool = True, timeout_s: float = 90.0) -> Table:
+    """
+    Fetch Gaia sources in the field.
+
+    Cached on disk and retried, because this is the one step that depends on
+    somebody else's server staying up. The Gaia archive is explicitly warning
+    of instability ahead of DR4, and a 500 here otherwise throws away a whole
+    night's unattended processing at the final step — the frames are fine,
+    but the run dies and needs a human.
+
+    The field for a given target does not change, so a cached answer is as
+    good as a fresh one and removes the dependency entirely on a re-run.
+    """
+    import time as _time
+
+    cache = _cache_path(ra_deg, dec_deg, radius_arcmin, mag_limit)
+    if use_cache and cache.exists():
+        try:
+            t = Table.read(cache, format="ascii.ecsv")
+            print(f"Comparison catalog from cache ({len(t)} sources; "
+                  f"delete {cache} to refresh)")
+            return t
+        except Exception:                                # noqa: BLE001
+            pass
+
     from astroquery.gaia import Gaia
 
     q = f"""
@@ -58,7 +177,42 @@ def query_field(ra_deg: float, dec_deg: float, radius_arcmin: float = 20.0,
                    CIRCLE('ICRS', {ra_deg}, {dec_deg}, {radius_arcmin / 60.0})) = 1
       AND phot_g_mean_mag < {mag_limit}
     """
-    return Gaia.launch_job_async(q).get_results()
+
+    last = None
+    for i in range(attempts):
+        table, last = _with_timeout(
+            lambda: Gaia.launch_job_async(q).get_results(), timeout_s)
+        if table is not None and last is None:
+            break
+        if i < attempts - 1:
+            wait = 15 * (i + 1)
+            print(f"  Gaia query failed ({last}); retrying in {wait}s "
+                  f"({attempts - i - 1} left)")
+            _time.sleep(wait)
+        table = None
+    else:
+        print(f"  Gaia archive unavailable ({last}); trying VizieR for the "
+              f"same catalog")
+        table, verr = _with_timeout(
+            lambda: _query_vizier_gaia(ra_deg, dec_deg, radius_arcmin,
+                                       mag_limit), timeout_s)
+        if verr is not None:
+            print(f"  VizieR also failed ({verr})")
+            table = None
+        if table is None:
+            raise SystemExit(
+                f"Neither the Gaia archive nor VizieR answered ({last}).\n"
+                f"The frames are fine — re-run this step when one of them is "
+                f"back.")
+        print(f"  VizieR returned {len(table)} sources")
+
+    if use_cache:
+        try:
+            CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            table.write(cache, format="ascii.ecsv", overwrite=True)
+        except Exception:                                # noqa: BLE001
+            pass
+    return table
 
 
 def query_vsx(ra_deg: float, dec_deg: float, radius_arcmin: float = 20.0):
@@ -299,3 +453,80 @@ def stability_report(fluxes: np.ndarray) -> np.ndarray:
             norm = ratio / med
             out[i] = 1.4826 * np.nanmedian(np.abs(norm - 1.0)) * 1e6
     return out
+
+
+def choose_ensemble(target_flux, comp_flux, out_of_transit,
+                    max_n: int = 8, min_n: int = 5,
+                    say=print) -> list:
+    """
+    Pick the SET of comparison stars that yields the cleanest light curve.
+
+    Choosing the stars that look steadiest individually is not the same as
+    choosing the combination that measures best. Comparison stars share
+    errors — colour-dependent extinction, flat-field structure, a gradient
+    across the frame — so a star that is mediocre alone can cancel another's
+    systematics, and two excellent stars can share the same one.
+
+    So judge each candidate set by what we actually care about: the scatter
+    of the target's differential light curve outside transit. Greedy forward
+    selection, adding whichever star most improves that, stopping when none
+    does. With fifty candidates this costs a few hundred evaluations where
+    trying every subset would need millions.
+
+    Returns the chosen indices into comp_flux.
+    """
+    target_flux = np.asarray(target_flux, dtype=float)
+    comp_flux = np.asarray(comp_flux, dtype=float)
+    oot = np.asarray(out_of_transit, dtype=bool)
+    n_comp = comp_flux.shape[0]
+    min_n = min(min_n, n_comp)
+    max_n = max(max_n, min_n)
+    if n_comp <= min_n or oot.sum() < 10:
+        return list(range(n_comp))
+
+    def score(idx):
+        if not idx:
+            return np.inf
+        ens = np.nansum(comp_flux[list(idx), :], axis=0)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            rel = target_flux / ens
+        r = rel[oot]
+        r = r[np.isfinite(r)]
+        if r.size < 10:
+            return np.inf
+        m = np.median(r)
+        if not np.isfinite(m) or m <= 0:
+            return np.inf
+        return 1.4826 * np.median(np.abs(r - m)) / m * 1e6
+
+    chosen: list = []
+    best = np.inf
+    while len(chosen) < min(max_n, n_comp):
+        gains = [(score(chosen + [j]), j)
+                 for j in range(n_comp) if j not in chosen]
+        gains.sort()
+        if not gains or not np.isfinite(gains[0][0]):
+            break
+        s, j = gains[0]
+
+        # Below the floor, keep adding regardless. The scatter of ~60
+        # out-of-transit points is itself uncertain by roughly 1/sqrt(2N),
+        # about 9%, so a search over many subsets WILL find combinations that
+        # fit that noise. A small ensemble also concentrates the weight: a
+        # three-star set where one star carries two thirds of it has nothing
+        # to balance that star if it misbehaves.
+        if len(chosen) < min_n:
+            chosen.append(j)
+            best = s
+            continue
+
+        # Above the floor, only take an extra star if it genuinely helps.
+        if s < best * (1.0 - 0.02):
+            chosen.append(j)
+            best = s
+        else:
+            break
+
+    say(f"Ensemble search: {len(chosen)} of {n_comp} candidates give the "
+        f"cleanest curve ({best:.0f} ppm out of transit)")
+    return sorted(chosen)

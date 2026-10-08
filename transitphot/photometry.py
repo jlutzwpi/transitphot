@@ -588,3 +588,30 @@ def fits_files(directory, recursive: bool = False) -> list:
         if any(name.endswith(s) for s in FITS_SUFFIXES):
             out.append(p)
     return sorted(out)
+
+
+def session_filter(paths, sample: int = 25) -> tuple:
+    """
+    The filter the frames were actually taken through, from their headers.
+
+    Returns (name, mixed), where mixed is True if the session used more than
+    one — which for transit photometry is a problem in itself, since a band
+    change mid-series puts a step in the light curve.
+    """
+    seen = {}
+    step = max(len(paths) // sample, 1)
+    for p in list(paths)[::step][:sample]:
+        try:
+            h = fits.getheader(p)
+        except Exception:                                # noqa: BLE001
+            continue
+        for key in ("FILTER", "FILTER1", "FILT"):
+            v = h.get(key)
+            if v is not None and str(v).strip():
+                name = str(v).strip()
+                seen[name] = seen.get(name, 0) + 1
+                break
+    if not seen:
+        return None, False
+    best = max(seen, key=seen.get)
+    return best, len(seen) > 1

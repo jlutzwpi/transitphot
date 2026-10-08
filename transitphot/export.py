@@ -122,7 +122,8 @@ def write_aavso(path, bjd_tdb, flux, flux_err, *, obscode: str,
                 software: str = "transitphot",
                 ra: str | None = None, dec: str | None = None,
                 priors: str = "", results: str = "", notes: str = "",
-                airmass=None, measurement_type: str = "Rnflux"):
+                airmass=None, meridian_flip=None,
+                measurement_type: str = "Rnflux"):
     """
     Write an AAVSO Exoplanet Database report file.
 
@@ -142,7 +143,14 @@ def write_aavso(path, bjd_tdb, flux, flux_err, *, obscode: str,
       faith.
     """
     path = Path(path)
-    detrend = "Airmass" if airmass is not None else ""
+    cols = []
+    if airmass is not None:
+        cols.append("Airmass")
+    if meridian_flip is not None:
+        # A step indicator, 0 before the flip and 1 after: reviewers fit it
+        # themselves rather than taking our correction on trust.
+        cols.append("Meridian_Flip")
+    detrend = ",".join(cols)
 
     head = [
         "#TYPE=EXOPLANET",
@@ -178,9 +186,13 @@ def write_aavso(path, bjd_tdb, flux, flux_err, *, obscode: str,
         # All four detrend columns are always written, unused ones as n/a
         # placeholders — the spec calls for placeholders and the reference
         # files emit the full set.
-        cols = [f"{float(airmass[i]):.6f}"] if airmass is not None else []
-        cols += ["n/a"] * (4 - len(cols))
-        lines.append(f"{t:.8f},{f:.6f},{err}," + ",".join(cols))
+        vals = []
+        if airmass is not None:
+            vals.append(f"{float(airmass[i]):.6f}")
+        if meridian_flip is not None:
+            vals.append(f"{float(meridian_flip[i]):.0f}")
+        vals += ["n/a"] * (4 - len(vals))
+        lines.append(f"{t:.8f},{f:.6f},{err}," + ",".join(vals))
 
     path.write_text("\n".join(lines) + "\n")
     return path

@@ -68,19 +68,33 @@ def plot_lightcurve(bjd, flux, flux_err=None, fit_result=None,
         # Draw the model that was actually fitted, step and all. A
         # continuous curve over a discontinuous fit makes good data look
         # offset and puts a false structure in the residuals.
+        # Show the curve with the flip offset removed from the DATA rather
+        # than drawn into the model. The step is real — the field lands on
+        # different pixels after the flip — but it is an instrumental
+        # offset, not something the planet did, and a reader comparing two
+        # halves of a night should not have to mentally subtract it.
+        step = getattr(fit_result, "flip_step", 0.0)
+        fb = getattr(fit_result, "flip_bjd", None)
+        if fb and step:
+            after = np.asarray(bjd) > fb
+            flux = np.where(after, flux / (1.0 + step), flux)
+            corrected_note = (f"flip offset of {step*1e6:+.0f} ppm removed "
+                              f"from the data")
+        else:
+            corrected_note = None
+
         def _model(tt):
-            step = getattr(fit_result, "flip_step", 0.0)
-            fb = getattr(fit_result, "flip_bjd", None)
-            mask = (np.asarray(tt) > fb) if (fb and step) else None
-            # the fitted baseline level, not 1.0: the curve is normalized
-            # to its own median, which is not where the fit put the continuum
+            # No step here: the data above has already been divided by it, so
+            # the model must be continuous or the correction is applied twice.
+            # The baseline is the fitted level, not 1.0 — the curve is
+            # normalized to its own median, which is not where the fit put
+            # the continuum.
             return trapezoid(tt, fit_result.mid_bjd, fit_result.depth,
                              fit_result.duration_days,
                              fit_result.ingress_days,
                              getattr(fit_result, "baseline_flux", 1.0),
                              fit_result.baseline_slope,
-                             fit_result.baseline_curve,
-                             flip_step=step, after_flip=mask)
+                             fit_result.baseline_curve)
 
         model = _model(fine)
         ax.plot((fine - t0) * 24.0, model, "-", lw=1.8, color="#c1121f",
@@ -93,8 +107,13 @@ def plot_lightcurve(bjd, flux, flux_err=None, fit_result=None,
     # ingress and egress, which is exactly where the mid-time comes from.
     if ld_fit is not None and period:
         from .limbdark import model_curve
+        _ld_step = getattr(ld_fit, "flip_step", 0.0)
+        _ld_fb = getattr(ld_fit, "flip_bjd", None)
         ld_model = model_curve(fine, ld_fit, period,
                                base=getattr(ld_fit, "baseline_flux", 1.0))
+        if _ld_fb and _ld_step:
+            ld_model = np.where(np.asarray(fine) > _ld_fb,
+                                ld_model / (1.0 + _ld_step), ld_model)
         ax.plot((fine - t0) * 24.0, ld_model, "-", lw=1.8, color="#2a6f97",
                 label="limb-darkened fit")
         ax.axvline((ld_fit.mid_bjd - t0) * 24.0, ls="--", lw=1,
