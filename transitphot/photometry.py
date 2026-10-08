@@ -243,6 +243,14 @@ def measure(data: np.ndarray, positions: list[tuple[float, float]],
     bkg_median = []
     for m in ann_masks:
         vals = m.multiply(data)
+        if vals is None:
+            # The annulus has zero overlap with the frame — the position
+            # behind it is off the sensor entirely (refine_position already
+            # flagged it, but a frame is kept if enough OTHER comps are
+            # still good, so this one rides along with a stale position).
+            # NaN for this star on this frame, not a crash for the batch.
+            bkg_median.append(np.nan)
+            continue
         vals = vals[m.data > 0]
         vals = vals[np.isfinite(vals)]
         if vals.size == 0:
