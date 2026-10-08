@@ -117,6 +117,96 @@ class NinaAPI:
         return [h for h in (resp or []) if isinstance(h, dict)]
 
 
+_LOOP_COUNT_RE = re.compile(r"^~(\d+)x")
+
+
+def expected_exposure_counts(state) -> dict[str, tuple[int, str | None]]:
+    """
+    How many light frames the sequence plans for each target, and whether
+    that target's own container has actually finished.
+
+    transitphot's own exported sequences name the main exposure loop
+    container '~179x60s until 22:09_Container' — about 179 shots of 60s,
+    running until a wall-clock cutoff rather than a fixed count, hence the
+    '~'. It is an estimate, not a contract, but it is the only concrete
+    expectation available, and a sequence that stops partway through the
+    night comes in wildly short of even an approximate one.
+
+    The status matters as much as the count: a multi-target sequence file
+    lists every target up front, most still CREATED (not started) or
+    RUNNING hours before their turn. Only a target whose own container has
+    reached one of TERMINAL is actually done — comparing a not-yet-run
+    target's count would flag every scheduled-for-later target as "short"
+    before it ever got a chance to run.
+    """
+    out: dict[str, tuple[int, str | None]] = {}
+
+    def walk(node, target: str | None, status: str | None):
+        if isinstance(node, dict):
+            name = str(node.get("Name") or "")
+            tgt = node.get("Target")
+            if isinstance(tgt, dict) and tgt.get("TargetName"):
+                target = str(tgt["TargetName"])
+                status = str(node.get("Status") or "").upper() or None
+            elif target is None and name.endswith("_Container"):
+                target = name[: -len("_Container")]
+                status = str(node.get("Status") or "").upper() or None
+            m = _LOOP_COUNT_RE.match(name)
+            if m and target and target not in out:
+                out[target] = (int(m.group(1)), status)
+            for v in node.values():
+                walk(v, target, status)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item, target, status)
+
+    walk(state, None, None)
+    return out
+
+
+def light_counts_by_target(history_entries: list[dict]) -> dict[str, int]:
+    """Count of recorded LIGHT frames, grouped by the target they name."""
+    counts: dict[str, int] = {}
+    for e in history_entries:
+        if str(e.get("ImageType") or "").upper() == "LIGHT":
+            t = e.get("TargetName")
+            if t:
+                counts[t] = counts.get(t, 0) + 1
+    return counts
+
+
+def warn_if_short(api: "NinaAPI", say=print, shortfall: float = 0.9) -> None:
+    """
+    Compare actual light frames against the sequence's own planned count
+    and say so loudly if a target came in short.
+
+    Reads the sequence and image history directly from the API rather than
+    the on-disk history file, which is only flushed every few polls — this
+    runs once, right as the sequence ends, and the last frames saved in the
+    final moments shouldn't read as a false shortfall. This is exactly the
+    moment a stopped-early run (hardware fault, a cancelled sequence, a
+    crash) would otherwise go unnoticed until someone reviews the
+    photometry the next morning instead of being told that night.
+    """
+    try:
+        expected = expected_exposure_counts(api.get("sequence/state"))
+        if not expected:
+            return
+        actual = light_counts_by_target(api.image_history())
+        for target, (exp, status) in expected.items():
+            if status not in TERMINAL:
+                continue          # not its turn yet, or still running
+            got = actual.get(target, 0)
+            if exp > 0 and got < exp * shortfall:
+                say(f"  WARNING: {target} got {got} of an expected ~{exp} "
+                    f"light frame(s) ({got / exp:.0%}) — the sequence "
+                    f"stopped short of its plan. Check what happened "
+                    f"(clouds, a fault, a cancelled run) before trusting "
+                    f"tonight's data.")
+    except Exception:                                    # noqa: BLE001
+        pass
+
+
 def merge_history(path: Path, entries: list[dict]) -> int:
     """
     Merge history entries into a JSON file on disk, keyed by filename.
@@ -194,9 +284,11 @@ def wait_for_sequence_end(api: NinaAPI, *, poll_s: float = 60.0,
             seen_running = True
         elif status in TERMINAL:
             say(f"  sequence ended ({status})")
+            warn_if_short(api, say=say)
             return True
         elif seen_running and status is not None:
             say(f"  sequence stopped ({status}) after running")
+            warn_if_short(api, say=say)
             return True
 
         time.sleep(poll_s)
