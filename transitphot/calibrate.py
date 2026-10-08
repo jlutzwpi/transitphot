@@ -13,6 +13,7 @@ Design notes
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 from .photometry import fits_files
@@ -234,6 +235,33 @@ def _report_flat(master) -> None:
 
 
 
+def _check_disk_space(dest: Path, frame_bytes: int, remaining: int) -> None:
+    """
+    Raise a clear, immediate error if the disk can't hold what's left.
+
+    ccdproc/astropy will eventually surface the OS's own "not enough space"
+    OSError, but only after however many frames did fit, and that error is
+    an unreadable pile of retried-write messages. Checking free space before
+    each write catches the problem on the frame it first becomes true for —
+    ideally frame 1 of 650, not frame 400 after an hour of combining — and
+    reports it in one sentence instead.
+
+    frame_bytes should be the actual in-memory size of the calibrated frame
+    (float64 after ccdproc, typically 4-8x the raw file), which is a solid
+    proxy for the written FITS file size; the header adds only a few KB.
+    """
+    free = shutil.disk_usage(dest.parent).free
+    needed = frame_bytes * remaining
+    margin = max(frame_bytes, 200_000_000)   # headroom: 1 frame or 200 MB
+    if free < needed + margin:
+        raise SystemExit(
+            f"Not enough disk space to finish calibrating: {remaining} "
+            f"frame(s) left need about {needed / 1e9:.1f} GB, but only "
+            f"{free / 1e9:.1f} GB is free on the drive holding "
+            f"{dest.parent}.\nFree up space, point --out at a drive with "
+            f"more room, or calibrate the lights in smaller batches.")
+
+
 def calibrate_night(lights_dir: Path, bias_dir: Path | None = None,
                     darks_dir: Path | None = None, flats_dir: Path | None = None,
                     out_dir: Path | None = None, scale_dark: bool = False,
@@ -265,9 +293,14 @@ def calibrate_night(lights_dir: Path, bias_dir: Path | None = None,
         _report_flat(mf)
 
     written = []
-    for p in fits_files(lights_dir):
+    lights = fits_files(lights_dir)
+    for i, p in enumerate(lights):
         cal = calibrate_light(p, mb, md, mf, scale_dark=scale_dark)
         dest = out_dir / f"cal_{p.name}"
+        # Checked with the real, already-computed frame size, against how
+        # many frames are left — so a doomed run stops on the first frame
+        # that won't fit, rather than partway through the batch.
+        _check_disk_space(dest, cal.data.nbytes, len(lights) - i)
         cal.write(dest, overwrite=True)
         written.append(dest)
     return written
