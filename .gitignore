@@ -12,6 +12,7 @@ venv/
 *.reg
 *.fits
 *.fit
+*.txt
 lightcurve*
 *_summary.json
 
