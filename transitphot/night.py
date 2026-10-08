@@ -92,10 +92,21 @@ def run_night(args, *, cmd_sync, cmd_calibrate, cmd_check, cmd_solve, cmd_run):
     n += 1
     _step(n, steps, "Calibrate")
     cal_dir = lights / "calibrated"
-    if cal_dir.exists() and fits_files(cal_dir) and not args.recalibrate:
+    light_files = fits_files(lights)
+    expected = {f"cal_{p.name}" for p in light_files}
+    existing = {p.name for p in fits_files(cal_dir)} if cal_dir.exists() else set()
+    if expected and expected <= existing and not args.recalibrate:
         _say(f"Calibrated frames already present in {cal_dir}; keeping them "
              f"(pass --recalibrate to redo).")
     else:
+        if existing and expected - existing:
+            # A previous run left some frames calibrated and not others —
+            # most often a crash partway through (e.g. the disk filled up).
+            # Redo the whole batch rather than silently running photometry
+            # on whichever fraction happened to finish last time.
+            _say(f"{len(existing)} calibrated frame(s) found for "
+                 f"{len(expected)} light(s) — looks like a previous run "
+                 f"didn't finish. Recalibrating the full set.")
         cal_args = argparse.Namespace(
             lights=str(lights), bias=args.bias, darks=args.darks,
             flats=args.flats, out=None,
