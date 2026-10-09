@@ -181,7 +181,7 @@ def align_to_reference(paths: list[Path], reference: Path | None = None):
             print(f"[align] skipped {p.name}: {exc}")
 
 
-def refine_position(data: np.ndarray, xy: tuple[float, float], box: float = 12.0,
+def refine_position(data: np.ndarray, xy: tuple[float, float], box: float = 16.0,
                     min_snr: float = 3.0):
     """
     Refine a catalog-projected position onto the actual star, and verify a
@@ -192,6 +192,17 @@ def refine_position(data: np.ndarray, xy: tuple[float, float], box: float = 12.0
     around a meridian flip), when cloud swallowed the field, or when the
     target drifted off the sensor. Those frames must be dropped: measuring
     empty sky produces a flux ratio that explodes and destroys the fit.
+
+    box was 12px until a run with no clouds, no flip and a fixed focuser
+    position still lost its last 36 frames to "undetectable": the night had
+    cooled ~1.5C with nothing to recompensate focus, so the PSF broadened
+    enough that its wings spilled past a 12px box and corrupted the local
+    background stats the SNR check depends on — the star was still there,
+    just not where a tight box could tell background from signal. 16px
+    gives the background estimate enough real sky to stay honest under
+    that kind of drift (margin: worst-case SNR on that run went from 2.6,
+    which failed, to 5.2) without touching min_snr, which is what actually
+    rejects empty sky or cloud.
     """
     from photutils.centroids import centroid_com
 
