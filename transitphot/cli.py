@@ -352,6 +352,16 @@ def cmd_run(args):
         except Exception:                                # noqa: BLE001
             pass
 
+    # Needed below regardless of how many apertures are tried: with a single
+    # forced --aperture-scale the scan block is skipped entirely, but oot is
+    # still used afterward to choose the comparison ensemble.
+    oot = None
+    if args.predicted_mid and args.duration_hours:
+        half = args.duration_hours / 48.0
+        oot = np.abs(bjd_all - args.predicted_mid) > half * 1.15
+        if oot.sum() < 15:
+            oot = None
+
     if len(RADII) > 1:
         # Score each aperture on the thing we actually measure: the scatter
         # of the target's differential light curve outside transit.
@@ -359,12 +369,6 @@ def cmd_run(args):
         # because a wider circle averages over more pixels — but that says
         # nothing about the target, and on real data the wider aperture has
         # produced a WORSE fit while looking better by that metric.
-        oot = None
-        if args.predicted_mid and args.duration_hours:
-            half = args.duration_hours / 48.0
-            oot = np.abs(bjd_all - args.predicted_mid) > half * 1.15
-            if oot.sum() < 15:
-                oot = None
         print("Aperture scan"
               + (" (target scatter outside transit):" if oot is not None
                  else " (median comparison-star scatter):"))
@@ -419,17 +423,22 @@ def cmd_run(args):
         # whose PSF narrows faster than a comparison's recovers more flux
         # as the night goes on than the comparison does, and the mismatch
         # doesn't cancel — it reads as a slow brightening that can distort
-        # a transit's measured depth. Refuse candidates narrower than the
-        # widest FWHM actually sampled this session; only fall back to the
-        # full ladder if every candidate is too small for that to be
-        # possible (the ladder itself needs widening, not this aperture).
+        # a transit's measured depth. A radius exactly equal to the worst
+        # FWHM isn't enough margin — on WASP-10 b, fitted depth kept
+        # improving (and residual RMS kept falling) all the way out past
+        # that bare floor before leveling off, so use the same 1.3x safety
+        # factor this module already reaches for elsewhere (the NOTE a few
+        # lines down). Only fall back to the full ladder if every candidate
+        # is too small for that to be possible (the ladder itself needs
+        # widening, not this aperture).
         radii_arr = np.asarray(RADII, dtype=float)
-        safe = finite & (radii_arr >= fwhm_max)
+        fwhm_floor = 1.3 * fwhm_max
+        safe = finite & (radii_arr >= fwhm_floor)
         if not safe.any():
-            print(f"  NOTE: every candidate aperture is narrower than the "
-                  f"session's worst FWHM ({fwhm_max:.1f} px); none can fully "
-                  f"contain it. Re-run with --max-aperture-scale "
-                  f"{fwhm_max / fwhm * 1.3:.1f} or larger.")
+            print(f"  NOTE: every candidate aperture is narrower than "
+                  f"1.3x the session's worst FWHM ({fwhm_floor:.1f} px); "
+                  f"none can safely contain it. Re-run with "
+                  f"--max-aperture-scale {fwhm_floor / fwhm:.1f} or larger.")
             safe = finite
         best_i = int(np.nanargmin(np.where(safe, meds, np.inf)))
 
