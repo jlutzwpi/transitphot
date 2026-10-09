@@ -62,9 +62,18 @@ def measure_fwhm(data: np.ndarray, xy: tuple[float, float],
 
 def session_fwhm(paths, positions_fn, sample: int = 15,
                  default: float = 4.0, report: bool = False,
-                 others_fn=None) -> float:
+                 others_fn=None) -> tuple[float, float]:
     """
     One FWHM for the whole session, from a sample of frames.
+
+    Returns (fwhm, fwhm_max): fwhm sizes the aperture ladder itself (the
+    80th percentile, below); fwhm_max is the single widest sampled value,
+    and exists so a caller choosing the FINAL aperture from that ladder can
+    refuse to go narrower than the worst seeing actually measured — see
+    cli.py's aperture scan, which on WASP-10 b once picked an aperture
+    scored best on scatter alone that was too tight for the night's wider
+    frames, recovering more of the target's flux than a comparison's as
+    seeing improved and inflating the apparent transit depth.
 
     The aperture radius MUST be constant across the series. Aperture
     photometry measures a fixed fraction of a star's light; if the aperture
@@ -117,7 +126,7 @@ def session_fwhm(paths, positions_fn, sample: int = 15,
             print(f"WARNING: no star found at the target position in any "
                   f"sampled frame — falling back to FWHM {default} px. "
                   f"Check that the coordinates match this data.")
-        return default
+        return default, default
 
     if report and tgt_vals and len(vals) >= 3:
         t = float(np.median(tgt_vals))
@@ -130,7 +139,7 @@ def session_fwhm(paths, positions_fn, sample: int = 15,
 
     # 80th percentile: size for the poorer-seeing frames so no frame has its
     # star spilling outside the aperture.
-    return float(np.percentile(vals, 80))
+    return float(np.percentile(vals, 80)), float(np.max(vals))
 
 
 def iter_frames(paths: list[Path]):

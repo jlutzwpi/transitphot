@@ -196,8 +196,11 @@ def cmd_run(args):
                 continue
         return out
 
-    fwhm = args.fwhm if args.fwhm else ph.session_fwhm(
-        paths, _target_xy, report=True, others_fn=_comp_xy)
+    if args.fwhm:
+        fwhm = fwhm_max = args.fwhm
+    else:
+        fwhm, fwhm_max = ph.session_fwhm(paths, _target_xy, report=True,
+                                         others_fn=_comp_xy)
     if not args.fwhm and not (1.5 <= fwhm <= 12.0):
         print(f"WARNING: measured session FWHM {fwhm:.1f} px is outside the "
               f"usual 2-8 px range. Check the finder chart; override with "
@@ -214,7 +217,8 @@ def cmd_run(args):
         scales = [round(0.7 * (top / 0.7) ** (i / 6), 2) for i in range(7)]
     RADII = [sc * fwhm for sc in scales]
     R_IN, R_OUT = 3.5 * fwhm, 6.0 * fwhm
-    print(f"Session FWHM {fwhm:.2f} px | trying apertures "
+    print(f"Session FWHM {fwhm:.2f} px (worst sampled {fwhm_max:.2f} px) | "
+          f"trying apertures "
           + ", ".join(f"{r:.1f}" for r in RADII)
           + f" px | sky annulus {R_IN:.1f}-{R_OUT:.1f} px")
 
@@ -408,13 +412,32 @@ def cmd_run(args):
 
         meds = np.asarray(meds, dtype=float)
         finite = np.isfinite(meds)
-        best_i = int(np.nanargmin(np.where(finite, meds, np.inf)))
+
+        # Scatter alone isn't the whole story: a small aperture can score
+        # well on point-to-point noise while being too tight to fully
+        # contain the night's WORST seeing. When that happens, a target
+        # whose PSF narrows faster than a comparison's recovers more flux
+        # as the night goes on than the comparison does, and the mismatch
+        # doesn't cancel — it reads as a slow brightening that can distort
+        # a transit's measured depth. Refuse candidates narrower than the
+        # widest FWHM actually sampled this session; only fall back to the
+        # full ladder if every candidate is too small for that to be
+        # possible (the ladder itself needs widening, not this aperture).
+        radii_arr = np.asarray(RADII, dtype=float)
+        safe = finite & (radii_arr >= fwhm_max)
+        if not safe.any():
+            print(f"  NOTE: every candidate aperture is narrower than the "
+                  f"session's worst FWHM ({fwhm_max:.1f} px); none can fully "
+                  f"contain it. Re-run with --max-aperture-scale "
+                  f"{fwhm_max / fwhm * 1.3:.1f} or larger.")
+            safe = finite
+        best_i = int(np.nanargmin(np.where(safe, meds, np.inf)))
 
         # Prefer the smallest aperture within a few percent of the best: the
         # extra area of a wider one is mostly sky, and a large circle is more
         # exposed to neighbors, gradients and flat-field error.
         TOL = 0.05
-        within = np.flatnonzero(finite & (meds <= meds[best_i] * (1.0 + TOL)))
+        within = np.flatnonzero(safe & (meds <= meds[best_i] * (1.0 + TOL)))
         if within.size and int(within[0]) != best_i:
             print(f"  {RADII[int(within[0])]:.1f} px is within {TOL:.0%} of the "
                   f"minimum at {RADII[best_i]:.1f} px; taking the smaller one.")
