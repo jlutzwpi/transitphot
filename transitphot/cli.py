@@ -535,6 +535,32 @@ def cmd_run(args):
     if tot > 0:
         print("Ensemble weights: " + ", ".join(
             f"G={c.mag:.2f} {100*w/tot:.0f}%" for c, w in zip(comps, weights)))
+
+    # Color-dependent extinction: measured from the comparisons' own mutual
+    # trends (they don't transit, so any airmass-correlated drift in their
+    # colors is the atmosphere, not astrophysics), then applied to the
+    # target using its own color offset from the ensemble. This has to be
+    # derived here, before comps/weights change further, but is applied
+    # later once the final airmass series (matching the frames that survive
+    # to the fit) is available.
+    k_color = delta_color = None
+    colors = np.array([c.color if c.color is not None else np.nan for c in comps])
+    if args.lat is not None and args.lon is not None:
+        from .airmass import airmass_series as _air_for_color
+        air_cc = _air_for_color(np.asarray(times, dtype=float), args.ra, args.dec,
+                                args.lat, args.lon, args.elevation)
+        k_color = cs.color_extinction_coefficient(cflux, colors, air_cc)
+        ok_c = np.isfinite(colors) & (weights > 0)
+        if k_color is not None and tcol is not None and ok_c.any():
+            ens_color = float(np.sum(colors[ok_c] * weights[ok_c])
+                              / np.sum(weights[ok_c]))
+            delta_color = tcol - ens_color
+            print(f"Color-dependent extinction: k''={k_color:+.4f} mag/airmass "
+                  f"per BP-RP unit; target is {delta_color:+.2f} redder than "
+                  f"the ensemble")
+        else:
+            k_color = None
+
     # Drop cloud-hit frames before building the curve: they carry a fraction
     # of the photons and dominate the noise budget.
     tmask, transp = ph.transparency_mask(cflux, min_fraction=args.min_transparency)
@@ -638,6 +664,16 @@ def cmd_run(args):
             air = airmass_series(times, args.ra, args.dec,
                                  args.lat, args.lon, args.elevation)
             print(f"  detrending against {describe(air)}")
+            if k_color is not None and delta_color is not None:
+                # norm is literally target/ensemble, so the color-extinction
+                # contamination already in it has the same exp(k*dcolor*dair)
+                # form the comparisons' own trends were regressed against —
+                # divide it back out before the transit model ever sees it.
+                correction = np.exp(-k_color * delta_color
+                                    * (air - np.nanmedian(air)))
+                norm = norm * correction
+                print(f"  removed an estimated {(np.nanmax(correction) - np.nanmin(correction)) * 1e6:.0f} ppm "
+                      f"color-extinction swing from the curve")
         elif args.detrend_airmass:
             print("  airmass detrending needs --lat/--lon; skipped")
 

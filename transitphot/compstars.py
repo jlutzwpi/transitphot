@@ -455,6 +455,91 @@ def stability_report(fluxes: np.ndarray) -> np.ndarray:
     return out
 
 
+def color_extinction_coefficient(comp_flux: np.ndarray, colors: np.ndarray,
+                                 airmass: np.ndarray,
+                                 min_spread: float = 0.15) -> float | None:
+    """
+    Measure tonight's color-dependent (second-order) extinction from the
+    comparison stars' own mutual trends, independent of the target.
+
+    First-order (gray) extinction dims every star by the same fraction per
+    airmass and divides out of a differential ratio automatically. Color
+    extinction does not: a blue star and a red star dim at different rates,
+    so on a night with a wide airmass range, any two comparisons with
+    different Gaia BP-RP will show a real, airmass-correlated drift in
+    their mutual flux ratio. That drift has nothing to do with a transit
+    and everything to do with the atmosphere, which makes it the right
+    (and only) place to measure the coefficient — fitting it from the
+    target's own curve at the same time would be measuring the same
+    effect twice with one piece of data, degenerate with the existing
+    gray-extinction term in fitting.trapezoid().
+
+    For each comparison, its ratio to the (unweighted) sum of all the
+    OTHERS is normalized by its own median — removing each star's zero
+    point — leaving a residual that should be flat at zero. Regressing
+    that residual against (this star's color minus the others' mean
+    color) x (airmass - median airmass), pooled over every comparison and
+    every frame, gives a single coefficient: how many magnitudes of extra
+    extinction per airmass a star picks up per unit of BP-RP.
+
+    Returns mag/airmass per BP-RP unit, or None when the comparisons don't
+    span enough color (min_spread, in BP-RP) to measure it reliably — a
+    tight color match is good for differential photometry but leaves
+    nothing here to regress against.
+    """
+    comp_flux = np.asarray(comp_flux, dtype=float)
+    colors = np.asarray(colors, dtype=float)
+    airmass = np.asarray(airmass, dtype=float)
+    n_stars = comp_flux.shape[0]
+    has_color = np.isfinite(colors)
+    if n_stars < 3 or has_color.sum() < 3:
+        return None
+    if np.nanmax(colors[has_color]) - np.nanmin(colors[has_color]) < min_spread:
+        return None
+
+    air_ref = float(np.nanmedian(airmass))
+    dair = airmass - air_ref
+    xs, ys = [], []
+    for i in range(n_stars):
+        if not has_color[i]:
+            continue
+        others = np.delete(comp_flux, i, axis=0)
+        other_colors = np.delete(colors, i)
+        ok_others = np.isfinite(other_colors)
+        if ok_others.sum() < 2:
+            continue
+        ensemble = np.nansum(others, axis=0)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ratio = comp_flux[i] / ensemble
+        med = np.nanmedian(ratio)
+        if not np.isfinite(med) or med <= 0:
+            continue
+        with np.errstate(divide="ignore", invalid="ignore"):
+            y = np.log(ratio / med)
+        # Weighted by each other star's own flux level, not a plain average:
+        # the ensemble sum's color-extinction response is dominated by
+        # whichever stars actually contribute the most photons to it.
+        other_levels = np.nanmedian(others[ok_others], axis=1)
+        mean_other_color = float(np.sum(other_colors[ok_others] * other_levels)
+                                 / np.sum(other_levels))
+        dcolor = colors[i] - mean_other_color
+        x = dcolor * dair
+        ok = np.isfinite(x) & np.isfinite(y)
+        xs.append(x[ok])
+        ys.append(y[ok])
+
+    if not xs:
+        return None
+    x = np.concatenate(xs)
+    y = np.concatenate(ys)
+    # Regression through the origin: each star's own zero point was already
+    # removed by normalizing to its median, so the fit has no intercept.
+    denom = float(np.sum(x * x))
+    if denom <= 0 or x.size < 10:
+        return None
+    return float(np.sum(x * y) / denom)
+
+
 def choose_ensemble(target_flux, comp_flux, out_of_transit,
                     max_n: int = 8, min_n: int = 5,
                     say=print) -> list:
