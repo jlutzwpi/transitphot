@@ -885,9 +885,11 @@ def cmd_run(args):
                             np.array([mer_jd]), args.ra, args.dec,
                             args.lat, args.lon, args.elevation)[0])
                         print(f"  meridian crossing at {mer:.5f} BJD_TDB")
+                plot_title = (f"{args.target_name} — RA {args.ra} Dec {args.dec}"
+                             if args.target_name else f"RA {args.ra} Dec {args.dec}")
                 plot_lightcurve(bjd, norm, err,
                                 res if args.model != "ld" else None,
-                                title=f"RA {args.ra} Dec {args.dec}",
+                                title=plot_title,
                                 out=Path(args.plot),
                                 predicted_mid=(pred if args.predicted_mid else None),
                                 duration_days=(args.duration_hours / 24.0
