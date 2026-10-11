@@ -25,6 +25,30 @@ from tkinter import filedialog, messagebox, ttk
 
 SETTINGS = Path.home() / ".transitphot_gui.json"
 
+
+def _sexagesimal_to_deg(text, hours: bool) -> float | None:
+    """
+    'HH:MM:SS.ss' or '+DD:MM:SS.ss' -> decimal degrees, stdlib only.
+
+    ExoClock's JSON reports coordinates this way rather than as decimal
+    degrees (RA, confusingly, in hours — the traditional astronomical
+    convention — not degrees); NASA's archive gives decimal degrees
+    directly. Everything downstream of a lookup (the CLI's --ra/--dec,
+    every distance and WCS computation) expects decimal degrees, so this
+    conversion has to happen right here or a sexagesimal string quietly
+    fails to parse as a float much later, in a far less obvious place.
+    """
+    if not text:
+        return None
+    try:
+        text = str(text).strip()
+        sign = -1.0 if text.startswith("-") else 1.0
+        h, m, s = (float(x) for x in text.lstrip("+-").split(":"))
+        deg = sign * (h + m / 60.0 + s / 3600.0)
+        return deg * 15.0 if hours else deg
+    except (TypeError, ValueError):
+        return None
+
 # Fields persisted between sessions. Site details rarely change; target
 # details usually do, but keeping them saves retyping during a night of
 # reprocessing.
@@ -324,6 +348,55 @@ class App(tk.Tk):
         threading.Thread(target=self._lookup_worker, args=(name,),
                          daemon=True).start()
 
+    def _exoclock_lookup(self, name):
+        """
+        Look up a planet in ExoClock's database as a fallback source.
+
+        The NASA archive's TAP API sits behind a Cloudflare challenge that
+        answers scripted clients with a 403 often enough to be a recurring
+        annoyance, not a rare fluke. ExoClock is a purpose-built alternative
+        for exactly this use — a community-maintained, actively-refined
+        ephemeris database for transit timing — reachable with one plain
+        request and no challenge in front of it. It also doesn't carry the
+        NASA archive's "pick the best of several published ephemerides"
+        problem: its t0/period ARE the current best, already.
+
+        ExoClock keys planets with no space before the letter ("WASP-10b"),
+        unlike this project's "WASP-10 b" convention, so match loosely.
+        Returns a dict in the same shape _lookup_worker already expects, or
+        None if the fetch fails or the name isn't found.
+        """
+        import urllib.request
+
+        try:
+            req = urllib.request.Request(
+                "https://www.exoclock.space/database/planets_json",
+                headers={"User-Agent": "transitphot"})
+            with urllib.request.urlopen(req, timeout=30) as r:
+                data = json.load(r)
+        except Exception:                                # noqa: BLE001
+            return None
+
+        key = re.sub(r"\s+", "", name).lower()
+        e = next((v for k, v in data.items()
+                 if re.sub(r"\s+", "", k).lower() == key), None)
+        if e is None:
+            return None
+
+        out = {"pl_name": name,
+              "ra": _sexagesimal_to_deg(e.get("ra_j2000"), hours=True),
+              "dec": _sexagesimal_to_deg(e.get("dec_j2000"), hours=False),
+              "sy_vmag": e.get("v_mag"), "sy_gaiamag": e.get("gaia_g_mag"),
+              "pl_tranmid": e.get("t0_bjd_tdb") or e.get("ephem_mid_time"),
+              "pl_orbper": e.get("period_days") or e.get("ephem_period"),
+              "pl_trandur": e.get("duration_hours")}
+        rps = e.get("rp_over_rs")
+        if rps:
+            out["pl_trandep"] = float(rps) ** 2 * 100       # fraction -> percent,
+                                                              # matching pl_trandep's
+                                                              # own convention
+        return out
+
     def _lookup_worker(self, name):
         """
         Query the NASA Exoplanet Archive TAP service.
@@ -387,21 +460,30 @@ class App(tk.Tk):
             if last_err is not None:
                 self.q.put(f"  attempt {attempt} failed ({last_err})\n")
 
+        from_exoclock = False
         if not rows:
-            if last_err is not None:
+            self.q.put("  NASA archive lookup failed; trying ExoClock\n")
+            ec = self._exoclock_lookup(name)
+            if ec is not None:
+                self.q.put("  found in ExoClock\n")
+                r0 = ec
+                from_exoclock = True
+            elif last_err is not None:
                 self.q.put(
                     "Lookup failed. The archive service is often slow or "
                     "briefly unavailable — try again in a moment, or enter "
                     "the values by hand from\n"
-                    "  https://exoplanetarchive.ipac.caltech.edu/\n")
+                    "  https://exoplanetarchive.ipac.caltech.edu/\n"
+                    "  https://www.exoclock.space/database/planets\n")
+                return
             else:
                 self.q.put(
                     f"No archive entry matching '{name}'. Names carry a space "
                     f"before the planet letter, e.g. 'TrES-5 b', "
                     f"'Kepler-17 b', 'WASP-10 b'.\n")
-            return
-
-        r0 = dict(rows[0])
+                return
+        else:
+            r0 = dict(rows[0])
 
         # pscomppars holds one merged row per planet and its ephemeris is
         # often the discovery paper's. Choosing between published
@@ -414,22 +496,38 @@ class App(tk.Tk):
         import time as _time
 
         eph = None
-        q_eph = (
-            "SELECT pl_tranmid, pl_tranmiderr1, pl_orbper, pl_orbpererr1, "
-            "pl_refname, pl_pubdate FROM ps "
-            f"WHERE pl_name = '{r0['pl_name']}' "
-            "AND pl_tranmid IS NOT NULL AND pl_orbper IS NOT NULL")
-        for delay in (0, 4):
-            if delay:
-                _time.sleep(delay)      # the archive rate-limits rapid queries
-            try:
-                eph = fetch(q_eph)
-                break
-            except Exception as exc:                    # noqa: BLE001
-                last = exc
-        if eph is None:
-            self.q.put(f"  could not compare published ephemerides ({last}); "
-                       f"using the archive default\n")
+        if from_exoclock:
+            # r0 already carries ExoClock's current-best t0/period directly —
+            # nothing to compare against, and no point asking the NASA
+            # archive for a target it just failed to answer about.
+            self.q.put("  using ExoClock's ephemeris directly "
+                       "(already its current best)\n")
+        else:
+            q_eph = (
+                "SELECT pl_tranmid, pl_tranmiderr1, pl_orbper, pl_orbpererr1, "
+                "pl_refname, pl_pubdate FROM ps "
+                f"WHERE pl_name = '{r0['pl_name']}' "
+                "AND pl_tranmid IS NOT NULL AND pl_orbper IS NOT NULL")
+            for delay in (0, 4):
+                if delay:
+                    _time.sleep(delay)  # the archive rate-limits rapid queries
+                try:
+                    eph = fetch(q_eph)
+                    break
+                except Exception as exc:                # noqa: BLE001
+                    last = exc
+            if eph is None:
+                self.q.put(f"  could not compare published ephemerides "
+                           f"({last}); trying ExoClock\n")
+                ec = self._exoclock_lookup(r0["pl_name"]) or self._exoclock_lookup(name)
+                if ec and ec.get("pl_tranmid") and ec.get("pl_orbper"):
+                    r0["pl_tranmid"] = ec["pl_tranmid"]
+                    r0["pl_orbper"] = ec["pl_orbper"]
+                    self.q.put("  using ExoClock's ephemeris instead "
+                               "of the archive default\n")
+                else:
+                    self.q.put("  not in ExoClock either; using the "
+                               "archive default\n")
 
         if eph:
             now_jd = _time.time() / 86400.0 + 2440587.5
