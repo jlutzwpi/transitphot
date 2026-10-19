@@ -18,7 +18,7 @@ from photutils.detection import DAOStarFinder
 
 
 def measure_fwhm(data: np.ndarray, xy: tuple[float, float],
-                 box: float = 15.0) -> float:
+                 box: float = 15.0, min_snr: float = 5.0) -> float:
     """
     FWHM from the area of the star's half-maximum region.
 
@@ -33,6 +33,18 @@ def measure_fwhm(data: np.ndarray, xy: tuple[float, float],
     sized apertures at 34 px, swallowing neighbors and sky. Half-max area
     only counts pixels the star genuinely lights up, so noise contributes
     almost nothing.
+
+    min_snr exists because this function has one caller (session_fwhm)
+    looking for two different things from it: a representative FWHM to
+    size the aperture ladder, and the single worst FWHM to floor the final
+    choice against. The default (5x local noise) is right for the former,
+    but wrong for the latter — a badly defocused star has a LOWER peak for
+    the same flux, so exactly the frames fwhm_max most needs to see are the
+    ones most likely to duck under a strict SNR gate and come back NaN
+    instead of reporting a large FWHM. Caught on HAT-P-28 b: a star
+    measurably reaching 12px FWHM by direct inspection never showed up in
+    session_fwhm's own numbers because every frame that defocused was
+    quietly dropped as "nothing bright enough here."
     """
     x, y = xy
     h, w = data.shape
@@ -45,7 +57,7 @@ def measure_fwhm(data: np.ndarray, xy: tuple[float, float],
     _, med, std = sigma_clipped_stats(cut, sigma=3.0)
     sub = cut - med
     peak = float(np.nanmax(sub))
-    if not np.isfinite(peak) or std <= 0 or peak < 5 * std:
+    if not np.isfinite(peak) or std <= 0 or peak < min_snr * std:
         return float("nan")                      # nothing bright enough here
 
     # Count only pixels near the center, so a neighboring star in the corner
@@ -60,20 +72,32 @@ def measure_fwhm(data: np.ndarray, xy: tuple[float, float],
     return float(fwhm) if 1.0 < fwhm < 20.0 else float("nan")
 
 
-def session_fwhm(paths, positions_fn, sample: int = 15,
+def session_fwhm(paths, positions_fn, sample: int = 100_000,
                  default: float = 4.0, report: bool = False,
                  others_fn=None) -> tuple[float, float]:
     """
-    One FWHM for the whole session, from a sample of frames.
+    One FWHM for the whole session, scanning every frame.
 
     Returns (fwhm, fwhm_max): fwhm sizes the aperture ladder itself (the
-    80th percentile, below); fwhm_max is the single widest sampled value,
-    and exists so a caller choosing the FINAL aperture from that ladder can
-    refuse to go narrower than the worst seeing actually measured — see
-    cli.py's aperture scan, which on WASP-10 b once picked an aperture
-    scored best on scatter alone that was too tight for the night's wider
-    frames, recovering more of the target's flux than a comparison's as
-    seeing improved and inflating the apparent transit depth.
+    80th percentile, below); fwhm_max is the single widest value measured
+    anywhere in the session, and exists so a caller choosing the FINAL
+    aperture from that ladder can refuse to go narrower than the worst
+    seeing actually hit — see cli.py's aperture scan, which on WASP-10 b
+    once picked an aperture scored best on scatter alone that was too
+    tight for the night's wider frames, recovering more of the target's
+    flux than a comparison's as seeing improved and inflating the apparent
+    transit depth.
+
+    This used to sample a subset of frames (15, then 40 after that same
+    failure mode recurred on HAT-P-28 b). Both were wrong for the same
+    reason: the night's single worst FWHM was an isolated one-frame spike
+    (11.7px against a next-worst cluster around 9.3-9.8px), not part of a
+    sustained trend, and no sparse sample can reliably land on a one-frame
+    event. sample is kept as an escape hatch for pathologically large
+    directories, but a real night's frame count (a few hundred at most)
+    is cheap to scan in full next to the per-frame work the rest of this
+    pipeline already does, and only a full scan actually guarantees
+    fwhm_max can't be blindsided by a single bad frame.
 
     The aperture radius MUST be constant across the series. Aperture
     photometry measures a fixed fraction of a star's light; if the aperture
@@ -89,9 +113,19 @@ def session_fwhm(paths, positions_fn, sample: int = 15,
     aperture wrong. Fainter comparisons are unaffected, so their median is
     the more honest number.
     """
-    vals, tgt_vals = [], []
-    step = max(len(paths) // sample, 1)
-    for p in paths[::step][:sample]:
+    vals, tgt_vals, all_vals = [], [], []
+    # Evenly spaced indices spanning the FULL session, both endpoints
+    # included. The previous stride-then-truncate approach (paths[::step]
+    # [:sample]) silently dropped the tail of the session whenever the
+    # stride produced more than `sample` frames — on a 156-frame night it
+    # missed the last 38 frames entirely, which is exactly where seeing or
+    # focus has had the most time to drift. The session's worst frame is
+    # disproportionately likely to be near one end, not the middle, so
+    # losing an end is the one thing this sampling cannot afford to do.
+    n = min(sample, len(paths))
+    idx = sorted(set(int(round(i)) for i in
+                     np.linspace(0, len(paths) - 1, n))) if n else []
+    for p in (paths[i] for i in idx):
         try:
             data = fits.getdata(p).astype(float)
             hdr = fits.getheader(p)
@@ -101,7 +135,7 @@ def session_fwhm(paths, positions_fn, sample: int = 15,
         try:
             xy = positions_fn(hdr)
             if xy is not None:
-                f = measure_fwhm(data, xy)
+                f = measure_fwhm(data, xy, min_snr=3.0)
                 if np.isfinite(f):
                     tgt_vals.append(f)
                     here.append(f)
@@ -110,13 +144,22 @@ def session_fwhm(paths, positions_fn, sample: int = 15,
         if others_fn is not None:
             try:
                 for xy in (others_fn(hdr) or []):
-                    f = measure_fwhm(data, xy)
+                    f = measure_fwhm(data, xy, min_snr=3.0)
                     if np.isfinite(f):
                         here.append(f)
             except Exception:                        # noqa: BLE001
                 pass
         if here:
             vals.append(float(np.median(here)))
+            # Every individual star's own FWHM, not just the per-frame
+            # median across them — a single star having a bad moment (one
+            # star's PSF spiking while the others stay normal) is exactly
+            # what the aperture floor needs to see and the median hides.
+            # Caught on HAT-P-28 b: the per-frame median topped out at
+            # 8.96px while one star alone reached 12.05px in the same
+            # sample, and that gap was enough to leave the aperture too
+            # tight for the night's actual worst PSF.
+            all_vals.extend(here)
 
     if not vals:
         if report:
@@ -137,9 +180,10 @@ def session_fwhm(paths, positions_fn, sample: int = 15,
                   f"it is probably close to the top of the well. Using the "
                   f"field value; consider shorter subs.")
 
-    # 80th percentile: size for the poorer-seeing frames so no frame has its
-    # star spilling outside the aperture.
-    return float(np.percentile(vals, 80)), float(np.max(vals))
+    # 80th percentile of the per-frame medians sizes the ladder — a stable,
+    # representative scale. The worst single star-frame value (not the
+    # worst per-frame median) is what the floor needs: see all_vals above.
+    return float(np.percentile(vals, 80)), float(np.max(all_vals))
 
 
 def iter_frames(paths: list[Path]):
