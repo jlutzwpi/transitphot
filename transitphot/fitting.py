@@ -21,7 +21,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
-from scipy.optimize import curve_fit
+from scipy.optimize import curve_fit, least_squares
 
 
 @dataclass
@@ -104,6 +104,24 @@ def fit(bjd: np.ndarray, flux: np.ndarray, flux_err: np.ndarray | None = None,
     back at the end. The mid-time also has many shallow local minima on noisy
     data, so we multi-start across the window and keep the lowest chi-square
     rather than trusting a single descent.
+
+    When a night is noisy or the target faint enough, chi-square alone can
+    prefer a local minimum driven by noise over the real transit — caught on
+    a Kepler-731 b night this bad, where every one of 10 multi-starts,
+    including one seeded exactly at the correct predicted mid-time,
+    converged over an hour away from the obvious real dip in the data. When
+    expected_mid is given, _search below adds a mild penalty toward it (see
+    mid_prior_width) — not a hard constraint, so a real transit at a
+    genuinely different time can still win on the data. Verified this
+    doesn't perturb well-constrained fits: on three independently-validated
+    targets from the same night, the penalized and unpenalized fits agreed
+    to within 0.01-0.56 minutes, far inside their own reported uncertainty.
+    It did NOT rescue the Kepler-731 b case itself — that night's
+    noise-driven minimum turned out to be a genuinely better fit to the
+    data by a wide, real margin, and no penalty strength recovers both a
+    sane mid-time and a sane depth simultaneously there. This helps the
+    ordinary case of a marginal, barely-outcompeted wrong minimum; it isn't
+    a substitute for data with enough signal to fit at all.
     """
     bjd = np.asarray(bjd, dtype=float)
     flux = np.asarray(flux, dtype=float)
@@ -169,18 +187,26 @@ def fit(bjd: np.ndarray, flux: np.ndarray, flux_err: np.ndarray | None = None,
     # Multi-start: the prior, plus a scan across the observed window.
     starts = [mid0] + list(np.linspace(x.min() + dur0 / 2,
                                        x.max() - dur0 / 2, 9))
+    # Width in days: ~15 minutes, not scaled to the transit duration —
+    # duration describes the transit's SHAPE and has no real relationship
+    # to how precisely its TIMING is known. 15 minutes instead reflects a
+    # realistic trust level for a well-established, multi-epoch-refined
+    # published ephemeris. Only meaningful (and only applied) when a
+    # prediction was actually given.
+    mid_prior_width = 15.0 / 1440.0 if expected_mid is not None else None
+
     def _search(use_airmass: bool):
         nonlocal air, use_air
         use_air = use_airmass
         air = air_full if use_airmass else None
         _lo, _hi = list(lo), list(hi)
-        n_base = len(_lo)
         if use_airmass:
             _lo[6], _hi[6] = -1e-9, 1e-9      # curvature off, airmass instead
             _lo, _hi = _lo + [-0.5], _hi + [0.5]
         if after_flip is not None:
             _lo, _hi = _lo + [-0.05], _hi + [0.05]
         _best, _cov, _chi2 = None, None, np.inf
+        _chi2_select = np.inf          # tracks the SAME objective used below
         for m in starts:
             mm = float(np.clip(m, _lo[0] + 1e-6, _hi[0] - 1e-6))
             p0 = [mm, dep0, dur0, dur0 * 0.12, 1.0, 0.0, 0.0]
@@ -189,20 +215,39 @@ def fit(bjd: np.ndarray, flux: np.ndarray, flux_err: np.ndarray | None = None,
             if after_flip is not None:
                 p0 = p0 + [0.0]
             p0 = [float(np.clip(v, a, b)) for v, a, b in zip(p0, _lo, _hi)]
-            def fn(tt, *pp, _air=air, _flip=after_flip, _ua=use_airmass):
-                return _evaluate(tt, pp, _ua, _air, _flip)
+
+            def resid_fn(pp, _air=air, _flip=after_flip, _ua=use_airmass):
+                model = _evaluate(x, pp, _ua, _air, _flip)
+                r = (flux - model) / (sigma if sigma is not None else 1.0)
+                if mid_prior_width is not None:
+                    r = np.append(r, (pp[0] - mid0) / mid_prior_width)
+                return r
+
             try:
-                popt, pcov = curve_fit(fn, x, flux, p0=p0, bounds=(_lo, _hi),
-                                       sigma=sigma,
-                                       absolute_sigma=sigma is not None,
+                result = least_squares(resid_fn, p0, bounds=(_lo, _hi),
                                        loss="soft_l1", f_scale=0.01,
-                                       maxfev=20000)
+                                       max_nfev=20000)
+                popt = result.x
             except Exception:                           # noqa: BLE001
                 continue
-            resid = flux - fn(x, *popt)
+            resid = flux - _evaluate(x, popt, use_airmass, air, after_flip)
             c2 = float(np.sum((resid / (sigma if sigma is not None else 1.0)) ** 2))
-            if c2 < _chi2:
-                _best, _cov, _chi2 = popt, pcov, c2
+            # Compare starts on the SAME objective each one was actually
+            # minimized against. Using data-only chi-square here would
+            # silently cancel the prior's effect: a start that wandered
+            # off and fit noise harder could still "win" the cross-start
+            # comparison even though its own optimization paid the
+            # prior's cost and a nearer one didn't.
+            c2_select = c2
+            if mid_prior_width is not None:
+                c2_select += ((popt[0] - mid0) / mid_prior_width) ** 2
+            if c2_select < _chi2_select:
+                try:
+                    cov = np.linalg.inv(result.jac.T @ result.jac)
+                except Exception:                       # noqa: BLE001
+                    cov = np.full((len(popt), len(popt)), np.nan)
+                _best, _cov, _chi2 = popt, cov, c2
+                _chi2_select = c2_select
         return _best, _cov, _chi2, _lo, _hi
 
 
