@@ -611,6 +611,51 @@ class App(tk.Tk):
         if r0.get("pl_name") and r0["pl_name"] != name:
             self.vars["target_name"].set(r0["pl_name"])
         self.q.put(f"Filled parameters for {r0['pl_name']}.\n")
+        self._warn_if_airmass_risky()
+
+    def _warn_if_airmass_risky(self):
+        """
+        Check the next transit's predicted airmass before a session is shot.
+
+        Runs right after a lookup fills ra/dec/mag/period/epoch, using
+        whatever site coordinates are already in the form (they persist
+        between sessions, so usually present). Silently does nothing if a
+        required field is missing or unparseable - this is an extra heads
+        up, not something that should ever block a lookup from completing.
+        """
+        try:
+            from .airmass import transit_window_risk
+            g = lambda k: float(self.vars[k].get())
+            mid, max_am, limit, risky = transit_window_risk(
+                epoch_bjd=g("epoch_bjd"), period_days=g("period"),
+                duration_hours=g("duration_hours"), target_mag=g("target_mag"),
+                ra_deg=g("ra"), dec_deg=g("dec"),
+                lat_deg=g("lat"), lon_deg=g("lon"),
+                elevation_m=g("elevation") if self.vars["elevation"].get() else 0.0)
+        except (KeyError, ValueError, TypeError, ZeroDivisionError):
+            return
+        if risky:
+            self.q.put(
+                f"  WARNING: next transit (predicted mid BJD {mid:.4f}) "
+                f"reaches airmass {max_am:.2f} within its window at this "
+                f"site - above the {limit:.1f} this target's brightness "
+                f"can likely afford. Faint targets lose disproportionately "
+                f"to scintillation/extinction noise past this point; "
+                f"consider a later epoch or trimming baseline on the "
+                f"high-airmass end.\n")
+
+        try:
+            from .airmass import moon_glow_risk
+            illum, moon_alt, moon_risky, reason = moon_glow_risk(
+                mid_jd=mid, ra_deg=g("ra"), dec_deg=g("dec"),
+                lat_deg=g("lat"), lon_deg=g("lon"),
+                elevation_m=g("elevation") if self.vars["elevation"].get() else 0.0,
+                target_mag=g("target_mag"),
+                filter_band=self.vars["filter_band"].get())
+        except (KeyError, ValueError, TypeError, ZeroDivisionError):
+            return
+        if moon_risky:
+            self.q.put(f"  WARNING: {reason}\n")
 
     # ---------------- running ----------------
     def _base_cmd(self, sub):
