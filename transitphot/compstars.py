@@ -7,8 +7,10 @@ clean 3 mmag light curve and an unusable one.
 
 Selection criteria, in the order they matter:
 
-1. **Brightness** — within ~1.5 mag of the target. Much brighter risks
-   saturation; much fainter adds its own shot noise to every measurement.
+1. **Brightness** — fainter than the target costs you (within ~1.5 mag,
+   past that it's rejected outright): a fainter comp only adds shot noise.
+   Brighter than the target is close to free, up to ~3x that tolerance —
+   the risk there is saturation/non-linearity, not "too good."
 2. **Color** — similar BP-RP to the target. Differential atmospheric
    extinction is color-dependent, so a red comparison against a blue target
    introduces a slow trend across the night that mimics (or hides) a transit.
@@ -303,6 +305,7 @@ def color_tolerance_for(filter_band: str | None) -> float:
 def select(target_ra: float, target_dec: float, target_mag: float,
            sources: Table, n: int = 5,
            mag_tolerance: float = 1.5,
+           bright_mag_tolerance: float | None = None,
            color_tolerance: float | None = None,
            min_separation_arcsec: float = 15.0,
            target_color: float | None = None,
@@ -316,7 +319,20 @@ def select(target_ra: float, target_dec: float, target_mag: float,
     The score is deliberately interpretable — each candidate carries the
     reasons it ranked where it did, so a user can sanity-check the choice
     instead of trusting a black box.
+
+    Brightness is scored asymmetrically. A comparison *fainter* than the
+    target only adds shot noise with nothing to offset it, so that side
+    keeps the tight `mag_tolerance` and a real penalty. A comparison
+    *brighter* than the target lowers the ensemble's noise floor — the
+    classic "match within ~1 mag" convention exists to equalize saturation
+    risk and sky-background fraction, not because brighter is bad — so it
+    gets a much wider allowance (`bright_mag_tolerance`, default 3x) and a
+    light penalty. Without this split, a faint target with plenty of
+    brighter field stars available still gets matched to comps as noisy as
+    itself, because "closest match" outscores "much lower noise."
     """
+    if bright_mag_tolerance is None:
+        bright_mag_tolerance = mag_tolerance * 3.0
     if color_tolerance is None:
         color_tolerance = color_tolerance_for(filter_band)
 
@@ -345,9 +361,13 @@ def select(target_ra: float, target_dec: float, target_mag: float,
 
         if sep < 0.05:                       # this is the target itself
             continue
-        dmag = abs(mag - target_mag)
-        if dmag > mag_tolerance:
-            continue
+        fainter = mag - target_mag           # positive: comp is fainter
+        if fainter > 0:
+            if fainter > mag_tolerance:
+                continue
+        else:
+            if -fainter > bright_mag_tolerance:
+                continue
         if nearest_arcsec[i] < min_separation_arcsec:
             continue                          # blended with a neighbor
         if str(row["phot_variable_flag"]).upper().startswith("VARIABLE"):
@@ -365,8 +385,12 @@ def select(target_ra: float, target_dec: float, target_mag: float,
         reasons = []
         score = 100.0
 
-        score -= (dmag / mag_tolerance) * 30
-        reasons.append(f"Δmag {dmag:+.2f}")
+        if fainter > 0:
+            score -= (fainter / mag_tolerance) * 30
+            reasons.append(f"Δmag {fainter:+.2f} (fainter)")
+        else:
+            score -= (-fainter / bright_mag_tolerance) * 5
+            reasons.append(f"Δmag {fainter:+.2f} (brighter — lower noise)")
 
         if target_color is not None and color is not None:
             dcol = abs(color - target_color)
