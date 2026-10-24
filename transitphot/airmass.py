@@ -27,6 +27,16 @@ from __future__ import annotations
 
 import numpy as np
 
+# AltAz transforms (airmass_series, moon_glow_risk) pull Earth orientation
+# data through astropy's IERS table, which errors outright once the cached
+# copy is more than 30 days stale rather than just degrading precision - so
+# an offline observing site eventually can't compute airmass at all. The
+# precision lost by using a stale table is sub-arcsecond in sky position;
+# irrelevant at the degree-level accuracy airmass and Moon altitude need
+# here, so relax the staleness check instead of letting it hard-fail a run.
+from astropy.utils.iers import conf as _iers_conf
+_iers_conf.auto_max_age = None
+
 
 def airmass_series(jd_utc, ra_deg: float, dec_deg: float,
                    lat_deg: float, lon_deg: float,
