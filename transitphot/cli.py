@@ -232,25 +232,40 @@ def cmd_run(args):
         _hdr = _fits.getheader(paths[0])
         _data = _fits.getdata(paths[0])
         _h, _w = _data.shape
-        keep_comps, off = [], []
+        keep_comps, off, sat = [], [], []
         for c in comps:
             try:
                 cx, cy = ph.sky_to_pixel(_hdr, c.ra_deg, c.dec_deg)
             except Exception:                            # noqa: BLE001
                 off.append(c); continue
             margin = 60
-            if margin <= cx <= _w - margin and margin <= cy <= _h - margin:
-                keep_comps.append(c)
-            else:
-                off.append(c)
+            if not (margin <= cx <= _w - margin and margin <= cy <= _h - margin):
+                off.append(c); continue
+            if ph.looks_saturated(_data, (cx, cy)):
+                sat.append(c); continue
+            keep_comps.append(c)
         if off:
             print(f"Dropping {len(off)} comparison star(s) that fall outside "
                   f"the frame ({', '.join(f'G={c.mag:.2f} at {c.sep_arcmin:.1f}' + chr(39) for c in off)})")
-            comps = keep_comps
+        if sat:
+            # Caught before spending a measurement pass on them, not after:
+            # see looks_saturated's docstring for the HAT-P-53 b case this
+            # closes — brighter-is-better comp selection nominating stars
+            # bright enough to clip, discovered only by their individual
+            # scatter once the whole session had already been measured.
+            print(f"Dropping {len(sat)} comparison star(s) that look "
+                  f"saturated in the reference frame (flat-topped core): "
+                  + ', '.join(f"G={c.mag:.2f} at {c.sep_arcmin:.1f}'" for c in sat))
+        comps = keep_comps
         if len(comps) < 2:
             raise SystemExit(
                 "Fewer than two comparison stars fall inside the frame. "
                 "Reduce --radius, or check that the field is as expected.")
+        _txy = _target_xy(_hdr)
+        if _txy is not None and ph.looks_saturated(_data, _txy):
+            print("WARNING: the target itself looks saturated (flat-topped "
+                  "core) in the reference frame — results will likely read "
+                  "the depth shallow. Shorter exposures would help.")
     except SystemExit:
         raise
     except Exception as exc:                             # noqa: BLE001

@@ -72,6 +72,44 @@ def measure_fwhm(data: np.ndarray, xy: tuple[float, float],
     return float(fwhm) if 1.0 < fwhm < 20.0 else float("nan")
 
 
+def looks_saturated(data: np.ndarray, xy: tuple[float, float], box: int = 7,
+                    flat_frac: float = 0.03, min_flat_pixels: int = 4) -> bool:
+    """
+    Flag a star whose core looks clipped rather than genuinely peaked.
+
+    Deliberately doesn't compare against a known ADU ceiling: calibration
+    (bias/dark/flat) shifts a raw sensor's saturation level by an amount
+    that varies frame to frame and camera to camera, and these files are
+    float32 already-calibrated data with no reliable "full well" constant
+    left in the header to check against (confirmed absent across two
+    different cameras on this project). What survives calibration is the
+    SHAPE: an unsaturated star has one smoothly-peaked pixel; a clipped one
+    has several adjacent pixels sitting at (near) the same maximum - a flat
+    plateau where the PSF's point should be.
+
+    Caught on HAT-P-53 b: the automatic comparison-star selection (which
+    now deliberately favors brighter stars for lower noise) nominated 5
+    candidates up to 2.8 mag brighter than the target, all of which turned
+    out to be saturated — caught only after a full-session measurement
+    pass, by their individual scatter being 100,000+ ppm. This check is
+    meant to catch the same thing on the reference frame alone, before
+    that wasted pass.
+    """
+    x, y = xy
+    h, w = data.shape
+    half = box // 2
+    x0, x1 = int(round(x - half)), int(round(x + half + 1))
+    y0, y1 = int(round(y - half)), int(round(y + half + 1))
+    if x0 < 0 or y0 < 0 or x1 > w or y1 > h or x1 - x0 < 3 or y1 - y0 < 3:
+        return False
+    cut = data[y0:y1, x0:x1].astype(float)
+    peak = float(np.nanmax(cut))
+    if not np.isfinite(peak) or peak <= 0:
+        return False
+    near_peak = int(np.sum(cut >= peak * (1.0 - flat_frac)))
+    return near_peak >= min_flat_pixels
+
+
 def session_fwhm(paths, positions_fn, sample: int = 100_000,
                  default: float = 4.0, report: bool = False,
                  others_fn=None) -> tuple[float, float]:
