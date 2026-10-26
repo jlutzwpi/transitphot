@@ -28,7 +28,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
-from scipy.optimize import curve_fit
+from scipy.optimize import curve_fit, least_squares
 
 
 @dataclass
@@ -112,11 +112,27 @@ def fit(bjd, flux, flux_err=None, *, period: float,
         expected_mid: float, expected_depth: float | None = None,
         expected_duration_hours: float | None = None,
         u1: float = 0.35, u2: float = 0.25,
-        flip_bjd: float | None = None) -> LimbDarkFit:
+        flip_bjd: float | None = None,
+        duration_prior_hours: float = 0.25) -> LimbDarkFit:
     """
     Fit the Mandel-Agol model. `period` is required — the model needs it to
     convert between orbital phase and time, and it is known far better from
     the archive than a single transit could determine.
+
+    duration_prior_hours softly anchors the fit toward the catalog-known
+    transit duration (default 15 minutes). Duration isn't a free parameter
+    here — it's derived from rp, a, and inc via transit_duration_hours()
+    after the fact — and unlike fitting.trapezoid()'s --fix-duration,
+    nothing previously held it near the expected value past the initial
+    a/Rs guess above. On a noisy single transit the optimizer is free to
+    trade rp/a/inc for a self-consistent but wrong geometry: on WASP-93 b,
+    duration drifted to 1.93h against a catalog 2.23h, taking Rp/Rs from
+    a trapezoid-consistent ~0.10 down to 0.077. This is a soft prior, not
+    a hard constraint — real duration uncertainty exists (impact parameter
+    and limb darkening both trade against it) and this must not
+    manufacture false precision — so it is only applied when
+    expected_duration_hours is actually given, and a genuinely better fit
+    at a different duration can still win.
     """
     bjd = np.asarray(bjd, dtype=float)
     flux = np.asarray(flux, dtype=float)
@@ -170,27 +186,62 @@ def fit(bjd, flux, flux_err=None, *, period: float,
     span = bjd.max() - bjd.min()
     starts = [expected_mid] + list(np.linspace(bjd.min() + 0.15 * span,
                                                bjd.max() - 0.15 * span, 7))
-    best = best_cov = None
-    best_chi2 = np.inf
+    dur_width = duration_prior_hours if expected_duration_hours else None
+
+    def resid_fn(pp):
+        r = (flux - model(bjd, *pp)) / (sigma if sigma is not None else 1.0)
+        if dur_width is not None:
+            dur = transit_duration_hours(period, pp[1], pp[2], pp[3])
+            if not np.isfinite(dur):
+                dur = 0.0          # heavily discourage a non-transiting
+                                   # geometry rather than let a NaN residual
+                                   # through to the optimizer
+            r = np.append(r, (dur - expected_duration_hours) / dur_width)
+        return r
+
+    best = best_jac = None
+    best_chi2_select = np.inf
     for m in starts:
         p0 = [float(np.clip(m, lo[0], hi[0])), rp0, a0, 88.0, 1.0, 0.0, 0.0]
         if after_flip is not None:
             p0 = p0 + [0.0]
         p0 = [float(np.clip(v, a, b)) for v, a, b in zip(p0, lo, hi)]
         try:
-            popt, pcov = curve_fit(model, bjd, flux, p0=p0, bounds=(lo, hi),
-                                   sigma=sigma,
-                                   absolute_sigma=sigma is not None,
-                                   maxfev=40000)
+            result = least_squares(resid_fn, p0, bounds=(lo, hi), max_nfev=40000)
         except Exception:                               # noqa: BLE001
             continue
+        popt = result.x
         resid = flux - model(bjd, *popt)
         chi2 = float(np.sum((resid / (sigma if sigma is not None else 1.0)) ** 2))
-        if chi2 < best_chi2:
-            best, best_cov, best_chi2 = popt, pcov, chi2
+        # Compare starts on the SAME objective each one was actually
+        # minimized against — data-only chi-square here would silently
+        # cancel the prior's effect (see fitting.py's _search for the
+        # same reasoning, and the bug this guards against).
+        chi2_select = chi2
+        if dur_width is not None:
+            dur = transit_duration_hours(period, popt[1], popt[2], popt[3])
+            if np.isfinite(dur):
+                chi2_select += ((dur - expected_duration_hours) / dur_width) ** 2
+        if chi2_select < best_chi2_select:
+            best, best_jac, best_chi2_select = popt, result.jac, chi2_select
     if best is None:
         raise RuntimeError("Limb-darkened fit did not converge.")
-    popt, pcov = best, best_cov
+    popt = best
+
+    # Uncertainties: refit once more with the plain (no-prior) objective,
+    # seeded from the prior-aware solution, and take only its covariance —
+    # not its point estimate, which would silently discard what the prior
+    # just bought. Falls back to the search's own Jacobian if this doesn't
+    # converge (it should, started already at a near-optimum).
+    try:
+        _, pcov = curve_fit(model, bjd, flux, p0=popt, bounds=(lo, hi),
+                            sigma=sigma, absolute_sigma=sigma is not None,
+                            maxfev=40000)
+    except Exception:                                   # noqa: BLE001
+        try:
+            pcov = np.linalg.inv(best_jac.T @ best_jac)
+        except Exception:                               # noqa: BLE001
+            pcov = np.full((len(popt), len(popt)), np.nan)
 
     perr = np.sqrt(np.diag(pcov))
     resid = flux - model(bjd, *popt)
