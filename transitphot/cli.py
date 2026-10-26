@@ -104,21 +104,29 @@ def cmd_run(args):
                     print(f"  … and {len(flags) - 8} more")
                 paths = [p for p in paths if p not in flags]
 
-    hdr0 = fits.getheader(paths[0])
-    if not ph.has_wcs(hdr0):
+    # A handful of leading frames can lack a WCS (test subs at a different
+    # exposure, left in the folder by mistake) without the night being
+    # unusable - the per-frame loop below already skips frames it can't
+    # place. But every downstream step in this section uses ONE reference
+    # frame's header/data (comp-star margin and saturation checks, the
+    # search radius), and paths[0] specifically is not guaranteed to be a
+    # frame that solved. Scan for the first one that did, rather than
+    # trusting the first file in the list.
+    ref_path = next((p for p in paths if ph.has_wcs(fits.getheader(p))), None)
+    if ref_path is None:
         raise SystemExit(
             "Frames have no usable WCS. ASIAIR solves for pointing but "
             "usually doesn't write a WCS into the subs.\n"
             "  transitphot check --lights <dir>     # confirm\n"
             f"  transitphot solve --lights <dir> --ra {args.ra} "
             f"--dec {args.dec}")
+    hdr0 = fits.getheader(ref_path)
 
     # Comparison stars: query the field, rank, then verify against the data
     print("Querying field for comparison stars…")
     radius = args.radius
     if radius is None:
-        from astropy.io import fits as _fits
-        radius = ph.field_radius_arcmin(_fits.getheader(paths[0]))
+        radius = ph.field_radius_arcmin(hdr0)
         print(f"Comparison search radius {radius:.1f}' (from the frame's WCS)")
     field = cs.query_field(args.ra, args.dec, radius_arcmin=radius)
 
@@ -126,8 +134,7 @@ def cmd_run(args):
     # Rank only stars that land on the sensor. The search radius is the
     # frame's half-diagonal, so on a small or elongated field most of that
     # circle is off-chip.
-    from astropy.io import fits as _f
-    field, n_off = ph.sources_in_frame(_f.getheader(paths[0]), field)
+    field, n_off = ph.sources_in_frame(hdr0, field)
     if n_off:
         print(f"{n_off} catalog star(s) in the search radius fall outside the "
               f"frame; ranking the {len(field)} that don't")
@@ -235,10 +242,9 @@ def cmd_run(args):
     # the short axis has far less room. Check once on the reference frame and
     # drop those, rather than failing every frame because one comparison is
     # permanently absent.
-    from astropy.io import fits as _fits
     try:
-        _hdr = _fits.getheader(paths[0])
-        _data = _fits.getdata(paths[0])
+        _hdr = hdr0
+        _data = fits.getdata(ref_path)
         _h, _w = _data.shape
         keep_comps, off, sat = [], [], []
         for c in comps:
