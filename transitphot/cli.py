@@ -105,6 +105,14 @@ def cmd_run(args):
                 paths = [p for p in paths if p not in flags]
 
     hdr0 = fits.getheader(paths[0])
+    if not ph.has_wcs(hdr0):
+        raise SystemExit(
+            "Frames have no usable WCS. ASIAIR solves for pointing but "
+            "usually doesn't write a WCS into the subs.\n"
+            "  transitphot check --lights <dir>     # confirm\n"
+            f"  transitphot solve --lights <dir> --ra {args.ra} "
+            f"--dec {args.dec}")
+
     # Comparison stars: query the field, rank, then verify against the data
     print("Querying field for comparison stars…")
     radius = args.radius

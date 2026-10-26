@@ -371,6 +371,24 @@ def measure(data: np.ndarray, positions: list[tuple[float, float]],
     return out[0] if np.ndim(r_ap) == 0 else out
 
 
+def has_wcs(header) -> bool:
+    """
+    True if the header carries an actual plate solution, not just mount
+    pointing.
+
+    ASIAIR/N.I.N.A. often write RA/DEC keywords (where the mount thinks it
+    pointed) without ever writing CTYPE1/CTYPE2 (an astrometric solution).
+    astropy.wcs.WCS() doesn't raise on a header with no WCS at all — it
+    silently returns a degenerate default, and every sky position then
+    maps to nearly the same nonsense pixel near the origin. That doesn't
+    look like a crash; it looks like every comparison star happening to
+    fall off the sensor, which is a confusing way to discover the real
+    problem. Check this before anything downstream of it runs.
+    """
+    return bool(str(header.get("CTYPE1", "")).strip()
+               and str(header.get("CTYPE2", "")).strip())
+
+
 def sky_to_pixel(header: dict, ra_deg: float, dec_deg: float):
     """Convert catalog coordinates to pixels using the frame's WCS."""
     w = WCS(header)
