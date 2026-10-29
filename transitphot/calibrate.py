@@ -208,11 +208,29 @@ def make_master_flat(flat_dir: Path, master_bias: CCDData | None = None,
     return master
 
 
+# Pointing and optical metadata that describes WHERE and WITH WHAT this
+# frame was taken, not the pixel values themselves. Nothing in calibration
+# (bias/dark subtraction, flat division) has any business changing these -
+# subtracting a bias frame doesn't move the telescope. Captured from the
+# light frame's own header before any ccdproc call and force-restored
+# after, as a belt-and-braces guard: a user's report showed RA/DEC/FOCALLEN
+# scrambled to nonsense after calibration alone (no solving involved yet)
+# on their setup, which this project's own test data couldn't reproduce -
+# consistent with a ccdproc/astropy-version-specific or stale-header-
+# triggered bug rather than anything this module's own code does (it never
+# writes these keys itself). Restoring them explicitly makes the guarantee
+# "calibration preserves pointing metadata" true by construction instead
+# of by accident of whichever library version happens to be installed.
+_POINTING_KEYS = ("RA", "DEC", "OBJCTRA", "OBJCTDEC", "OBJCTROT",
+                  "FOCALLEN", "FOCRATIO", "TELESCOP")
+
+
 def calibrate_light(path: Path, master_bias: CCDData | None,
                     master_dark: CCDData | None, master_flat: CCDData | None,
                     scale_dark: bool = False) -> CCDData:
     """Apply available masters to a single light frame."""
     img = CCDData.read(path, unit="adu")
+    original = {k: img.meta[k] for k in _POINTING_KEYS if k in img.meta}
     if master_bias is not None:
         img = ccdproc.subtract_bias(img, master_bias)
     if master_dark is not None:
@@ -222,6 +240,8 @@ def calibrate_light(path: Path, master_bias: CCDData | None,
         )
     if master_flat is not None:
         img = ccdproc.flat_correct(img, master_flat)
+    for k, v in original.items():
+        img.meta[k] = v
     return img
 
 
