@@ -50,6 +50,7 @@ class CompCandidate:
 
 
 CACHE_DIR = Path.home() / ".transitphot" / "gaia"
+VSX_CACHE_DIR = Path.home() / ".transitphot" / "vsx"
 
 
 def _cache_path(ra_deg, dec_deg, radius_arcmin, mag_limit) -> Path:
@@ -217,6 +218,57 @@ def query_field(ra_deg: float, dec_deg: float, radius_arcmin: float = 20.0,
     return table
 
 
+def _vsx_cache_path(ra_deg, dec_deg, radius_arcmin) -> Path:
+    sign = "n" if dec_deg >= 0 else "s"
+    key = f"ra{ra_deg:.4f}_dec{sign}{abs(dec_deg):.4f}_r{radius_arcmin:.1f}"
+    return VSX_CACHE_DIR / (key.replace(".", "p") + ".ecsv")
+
+
+def _vsx_cache_age(path: Path) -> str:
+    import time as _time
+    days = (_time.time() - path.stat().st_mtime) / 86400.0
+    return f"{days * 24:.1f}h old" if days < 1 else f"{days:.1f}d old"
+
+
+def _vsx_from_cache(cache: Path):
+    """
+    Fall back to a previous successful VSX answer for this exact field.
+
+    Caught on WASP-93 b: VizieR was down, the run fell back to Gaia's flag
+    alone, and a known eclipsing binary VSX had already flagged in an
+    earlier, successful query of this same field (T-Cas0-02641, not
+    Gaia-variable-flagged) slipped into the comparison pool and took an
+    11% weight in the final ensemble. A query that answered once for this
+    field doesn't go stale fast enough to prefer "no screening at all"
+    over "slightly old screening."
+    """
+    if not cache.exists():
+        return None
+    try:
+        t = Table.read(cache, format="ascii.ecsv")
+    except Exception:                                    # noqa: BLE001
+        return None
+    coords = SkyCoord(np.asarray(t["ra"], dtype=float) * u.deg,
+                      np.asarray(t["dec"], dtype=float) * u.deg)
+    names = [str(x) for x in t["name"]]
+    types = [str(x) for x in t["type"]]
+    print(f"  VSX unreachable; using {len(names)} known variable(s) from a "
+          f"previous query of this field ({_vsx_cache_age(cache)}, "
+          f"delete {cache} to drop it) instead of screening on Gaia's flag "
+          f"alone")
+    return coords, names, types
+
+
+def _write_vsx_cache(cache: Path, coords, names, types) -> None:
+    try:
+        VSX_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        Table({"ra": coords.ra.deg, "dec": coords.dec.deg,
+              "name": names, "type": types}).write(
+            cache, format="ascii.ecsv", overwrite=True)
+    except Exception:                                    # noqa: BLE001
+        pass
+
+
 def query_vsx(ra_deg: float, dec_deg: float, radius_arcmin: float = 20.0):
     """
     Known variable stars in the field, from AAVSO's VSX via VizieR.
@@ -227,9 +279,18 @@ def query_vsx(ra_deg: float, dec_deg: float, radius_arcmin: float = 20.0):
     ASAS-SN, ZTF, Kepler, TESS and decades of other surveys, so it catches
     far more of the variables that would otherwise pass as comparisons.
 
-    Returns (SkyCoord, names, types), or None if VizieR can't be reached —
-    in which case the caller carries on with Gaia's flag alone.
+    Cached on disk like query_field's Gaia results, for the same reason:
+    the field's known variables don't change night to night, and a VizieR
+    outage otherwise silently weakens variable screening instead of
+    failing loudly — the worse failure mode, since nothing about "VSX
+    unreachable" looks dangerous until a known eclipsing binary has
+    already been measured as a comparison star.
+
+    Returns (SkyCoord, names, types): from a live query, from a cached one
+    if VizieR can't be reached, or None if neither is available — in which
+    case the caller carries on with Gaia's flag alone.
     """
+    cache = _vsx_cache_path(ra_deg, dec_deg, radius_arcmin)
     try:
         from astroquery.vizier import Vizier
         v = Vizier(columns=["Name", "Type", "RAJ2000", "DEJ2000"],
@@ -238,9 +299,11 @@ def query_vsx(ra_deg: float, dec_deg: float, radius_arcmin: float = 20.0):
                              radius=radius_arcmin * u.arcmin,
                              catalog="B/vsx/vsx")
     except Exception:                                    # noqa: BLE001
-        return None
+        return _vsx_from_cache(cache)
     if not res or len(res[0]) == 0:
-        return SkyCoord([], [], unit="deg"), [], []
+        coords, names, types = SkyCoord([], [], unit="deg"), [], []
+        _write_vsx_cache(cache, coords, names, types)
+        return coords, names, types
     t = res[0]
     try:
         coords = SkyCoord(t["RAJ2000"], t["DEJ2000"], unit=(u.deg, u.deg))
@@ -249,6 +312,7 @@ def query_vsx(ra_deg: float, dec_deg: float, radius_arcmin: float = 20.0):
                           unit=(u.hourangle, u.deg))
     names = [str(x) for x in t["Name"]]
     types = [str(x) for x in t["Type"]] if "Type" in t.colnames else [""] * len(t)
+    _write_vsx_cache(cache, coords, names, types)
     return coords, names, types
 
 
