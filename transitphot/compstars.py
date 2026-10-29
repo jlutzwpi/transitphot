@@ -400,6 +400,18 @@ def select(target_ra: float, target_dec: float, target_mag: float,
     if color_tolerance is None:
         color_tolerance = color_tolerance_for(filter_band)
 
+    # match_to_catalog_sky's self-match below needs at least two points to
+    # find anything other than itself; with 0 or 1, it raises a generic
+    # ValueError ("catalog cannot be a scalar or length-0") instead of
+    # explaining what actually happened. An empty `sources` means every
+    # catalog star this field query found landed outside the frame on its
+    # own WCS, which is a pointing/WCS problem worth its own diagnosis, not
+    # a crash deep inside isolation-testing math — the caller already
+    # raises a clear "no suitable comparison stars" error for an empty
+    # return, so return cleanly and let it.
+    if len(sources) < 2:
+        return []
+
     tgt = SkyCoord(target_ra * u.deg, target_dec * u.deg)
     coords = SkyCoord(sources["ra"], sources["dec"], unit="deg")
     seps = tgt.separation(coords).arcmin

@@ -138,6 +138,23 @@ def cmd_run(args):
     if n_off:
         print(f"{n_off} catalog star(s) in the search radius fall outside the "
               f"frame; ranking the {len(field)} that don't")
+    if len(field) < 2 and n_off:
+        # Every (or all but one) catalog star near the target landed outside
+        # the frame on its own WCS. "Widen --radius" (the generic no-comps
+        # message below) can't fix this — the search radius is already wide
+        # enough to have found n_off candidates. The real cause is almost
+        # always that the frame's WCS doesn't actually point where --ra/--dec
+        # says it should: a stale solve, a solved-to-the-wrong-field frame,
+        # or coordinates left over from a previous target.
+        raise SystemExit(
+            f"{n_off} catalog star(s) were found near RA {args.ra} / "
+            f"Dec {args.dec}, but none of them land inside this frame "
+            f"according to its own WCS — the frame most likely isn't "
+            f"actually pointed where --ra/--dec says.\n"
+            f"  transitphot check --lights <dir>     # compare the "
+            f"solved pointing against --ra/--dec\n"
+            f"Re-solve if the pointing is stale or wrong, or confirm "
+            f"--ra/--dec belongs to this target and not a previous one.")
     if tcol is not None:
         print(f"Target color BP-RP {tcol:.2f} (Gaia) — matching comparisons to it")
     else:
