@@ -730,17 +730,22 @@ class App(tk.Tk):
         setup, until FOCALLEN started being read from the header directly.
         sensor_height_mm stays available as a manual override, used only
         when the header doesn't carry what's needed (XPIXSZ/NAXIS2
-        missing) - not as the default source once it does.
+        missing) - not as the default source once it does. When derived
+        from the header, this also writes the value back into that field
+        (only if it's currently empty) so it's visible rather than used
+        invisibly behind the scenes.
         """
         try:
             hdr = self._header_from_frame()
             fl = float((hdr or {}).get("FOCALLEN") or 0)
             h = 0.0
+            h_from_header = False
             if hdr is not None:
                 xpixsz = float(hdr.get("XPIXSZ") or 0)
                 naxis2 = float(hdr.get("NAXIS2") or 0)
                 if xpixsz > 0 and naxis2 > 0:
                     h = xpixsz * naxis2 / 1000.0
+                    h_from_header = True
             if not (fl > 0):
                 fl = float(v.get("focal_length_mm") or 0)
             if not (h > 0):
@@ -748,6 +753,13 @@ class App(tk.Tk):
                 h = float(h_str) if h_str else 0.0
             if not (h > 0):
                 h = 15.7
+            # Show what's actually being used, not just use it silently -
+            # only when the field is empty, so this never clobbers a value
+            # someone deliberately typed to override the header.
+            if h_from_header and not (v.get("sensor_height_mm") or "").strip():
+                var = self.vars.get("sensor_height_mm")
+                if var is not None:
+                    var.set(f"{h:.2f}")
             return 57.3 * h / fl if fl > 0 and h > 0 else None
         except (TypeError, ValueError):
             return None
