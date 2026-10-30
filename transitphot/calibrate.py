@@ -208,21 +208,33 @@ def make_master_flat(flat_dir: Path, master_bias: CCDData | None = None,
     return master
 
 
-# Pointing and optical metadata that describes WHERE and WITH WHAT this
-# frame was taken, not the pixel values themselves. Nothing in calibration
-# (bias/dark subtraction, flat division) has any business changing these -
-# subtracting a bias frame doesn't move the telescope. Captured from the
-# light frame's own header before any ccdproc call and force-restored
-# after, as a belt-and-braces guard: a user's report showed RA/DEC/FOCALLEN
-# scrambled to nonsense after calibration alone (no solving involved yet)
-# on their setup, which this project's own test data couldn't reproduce -
-# consistent with a ccdproc/astropy-version-specific or stale-header-
-# triggered bug rather than anything this module's own code does (it never
-# writes these keys itself). Restoring them explicitly makes the guarantee
-# "calibration preserves pointing metadata" true by construction instead
-# of by accident of whichever library version happens to be installed.
+# Pointing, optical AND TIMING metadata that describes WHERE, WITH WHAT,
+# and WHEN this frame was taken - not the pixel values themselves. Nothing
+# in calibration (bias/dark subtraction, flat division) has any business
+# changing these - subtracting a bias frame doesn't move the telescope or
+# the clock. Captured from the light frame's own header before any
+# ccdproc call and force-restored after, as a belt-and-braces guard: a
+# user's report showed RA/DEC/FOCALLEN scrambled to nonsense after
+# calibration alone (no solving involved yet) on their setup, which this
+# project's own test data couldn't reproduce - consistent with a
+# ccdproc/astropy-version-specific or stale-header-triggered bug rather
+# than anything this module's own code does (it never writes these keys
+# itself). DATE-OBS and MJD-OBS turned out to be a second casualty of the
+# exact same mechanism, caught separately and far more seriously on a
+# different target: every one of 230 calibrated frames came out with the
+# IDENTICAL, wrong DATE-OBS (a different month entirely) while DATE-LOC
+# on the same frames stayed correct - collapsing the whole session onto a
+# single instant. That doesn't just bias a result the way a wrong RA/DEC
+# might; a transit fit needs a real time axis to mean anything at all, and
+# with every point sharing one timestamp the fit has nothing to converge
+# on - raising "did not converge" for a reason that had nothing to do
+# with the actual light curve. Restoring these explicitly makes the
+# guarantee "calibration preserves metadata it has no business touching"
+# true by construction instead of by accident of whichever library
+# version happens to be installed.
 _POINTING_KEYS = ("RA", "DEC", "OBJCTRA", "OBJCTDEC", "OBJCTROT",
-                  "FOCALLEN", "FOCRATIO", "TELESCOP")
+                  "FOCALLEN", "FOCRATIO", "TELESCOP",
+                  "DATE-OBS", "DATE-LOC", "MJD-OBS")
 
 # A real astrometric solution, as opposed to the plain pointing keys above.
 # Confirmed on a user's setup (not reproducible on this project's own test
