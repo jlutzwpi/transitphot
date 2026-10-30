@@ -38,6 +38,14 @@ def cmd_run(args):
     # ASIAIR headers lack MJD-OBS; astropy derives it from DATE-OBS and says
     # so for every frame. Correct behavior, useless as 243 lines of output.
     warnings.simplefilter("ignore", FITSFixedWarning)
+    # astroquery's own import chain pulls in astropy submodules (samp,
+    # the old test runner) that astropy itself has deprecated - noise
+    # about astropy's internals, not anything this project or a user did.
+    try:
+        from astropy.utils.exceptions import AstropyDeprecationWarning
+        warnings.simplefilter("ignore", AstropyDeprecationWarning)
+    except ImportError:                                  # noqa: BLE001
+        pass
     from . import photometry as ph
     from . import compstars as cs
     from astropy.io import fits
