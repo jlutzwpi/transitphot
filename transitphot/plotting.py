@@ -121,7 +121,25 @@ def plot_lightcurve(bjd, flux, flux_err=None, fit_result=None,
 
     ax.set_ylabel("normalized flux")
     ax.legend(frameon=False, fontsize=9)
-    ax.set_title(title or "Transit light curve")
+    ax.set_title(title or "Transit light curve", pad=20)
+
+    # A quick-glance summary under the title: whether there's a detection
+    # at all (SNR), how deep (depth), and how big the planet is relative
+    # to the star (Rp/Rs)^2 - the geometric quantity, not the trapezoid's
+    # flux-ratio depth, so it only applies when the limb-darkened fit ran.
+    stats = []
+    if has_fit and fit_result.depth_err:
+        snr = fit_result.depth / fit_result.depth_err
+        stats.append(f"SNR {snr:.1f}σ")
+        stats.append(f"depth {fit_result.depth_ppm:,.0f}±"
+                     f"{fit_result.depth_err * 1e6:,.0f} ppm")
+    if ld_fit is not None:
+        stats.append(f"(Rp/Rs)² {ld_fit.rp_rs ** 2:.4f}")
+    if stats:
+        ax.text(0.5, 1.0, "   •   ".join(stats), transform=ax.transAxes,
+                ha="center", va="bottom", fontsize=8.5, color="#555",
+                style="italic")
+
     ax.grid(alpha=0.15)
 
     if has_fit:
