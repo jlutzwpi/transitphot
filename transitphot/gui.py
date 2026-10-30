@@ -710,34 +710,41 @@ class App(tk.Tk):
         """
         Field height in degrees, for the plate solver.
 
-        Both inputs are read from the frame itself when possible, not
-        typed in: no field in this GUI has ever asked for a focal length
-        (there's no "focal_length_mm" entry anywhere), which meant
-        `transitphot solve` could never pass a FOV hint to ASTAP for any
-        user, regardless of setup - confirmed on a real failure where
-        ASTAP, given no --fov, guessed wrong and failed with "Not enough
-        stars" on an entirely solvable ~1 deg field. FOCALLEN is reliably
-        in the header (and now survives calibration intact); sensor height
-        is derivable from XPIXSZ x NAXIS2 (both in the same binned frame
-        of reference, so this is correct regardless of binning mode) more
-        reliably than guessing a camera family's typical sensor size.
-        sensor_height_mm stays available as a manual override for a camera
-        or binning case where the header doesn't carry what's needed.
+        The header is trusted FIRST, not as a fallback: a value read from
+        this specific file's own header is correct for this camera, right
+        now, by construction. A manually-typed field is a leftover from
+        whenever it was last touched - possibly for a completely different
+        camera - and this project's settings file persists it across
+        sessions and targets. Caught on real data: sensor_height_mm sat at
+        15.7 (entered once, for a different camera's APS-C sensor, per
+        this project's own old docstring example) and silently overrode
+        the correct ~11.3mm derived from THIS file's own XPIXSZ x NAXIS2
+        for an entirely different, square-sensor camera - a stale setting
+        masquerading as current intent. "Field is non-empty" was never a
+        safe proxy for "field is still right."
+
+        No field in this GUI has ever asked for a focal length (there's no
+        "focal_length_mm" entry anywhere), which meant `transitphot solve`
+        could never pass a FOV hint to ASTAP for any user, regardless of
+        setup, until FOCALLEN started being read from the header directly.
+        sensor_height_mm stays available as a manual override, used only
+        when the header doesn't carry what's needed (XPIXSZ/NAXIS2
+        missing) - not as the default source once it does.
         """
         try:
-            fl = float(v.get("focal_length_mm") or 0)
-            h_str = v.get("sensor_height_mm") or ""
-            h = float(h_str) if h_str else 0.0
-            if not (fl > 0) or not (h > 0):
-                hdr = self._header_from_frame()
-                if hdr is not None:
-                    if not (fl > 0):
-                        fl = float(hdr.get("FOCALLEN") or 0)
-                    if not (h > 0):
-                        xpixsz = float(hdr.get("XPIXSZ") or 0)
-                        naxis2 = float(hdr.get("NAXIS2") or 0)
-                        if xpixsz > 0 and naxis2 > 0:
-                            h = xpixsz * naxis2 / 1000.0
+            hdr = self._header_from_frame()
+            fl = float((hdr or {}).get("FOCALLEN") or 0)
+            h = 0.0
+            if hdr is not None:
+                xpixsz = float(hdr.get("XPIXSZ") or 0)
+                naxis2 = float(hdr.get("NAXIS2") or 0)
+                if xpixsz > 0 and naxis2 > 0:
+                    h = xpixsz * naxis2 / 1000.0
+            if not (fl > 0):
+                fl = float(v.get("focal_length_mm") or 0)
+            if not (h > 0):
+                h_str = v.get("sensor_height_mm") or ""
+                h = float(h_str) if h_str else 0.0
             if not (h > 0):
                 h = 15.7
             return 57.3 * h / fl if fl > 0 and h > 0 else None
