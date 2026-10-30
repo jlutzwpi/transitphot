@@ -52,7 +52,18 @@ def inspect(path: Path) -> WcsReport:
     has_core = all(k in h for k in WCS_KEYS)
     has_rot = any(k in h for k in ROT_KEYS)
     if has_core and has_rot:
-        return WcsReport(path, True, float(h["CRVAL1"]), float(h["CRVAL2"]))
+        crval1, crval2 = float(h["CRVAL1"]), float(h["CRVAL2"])
+        # A solve that failed (or never ran) can still leave every WCS
+        # keyword present with a placeholder value - (0, 0) is the one
+        # actually seen in the wild (N.I.N.A. embeds WCS keywords in every
+        # sub, filled with this placeholder when that particular frame was
+        # never individually solved). (0, 0) is a real point on the sky,
+        # but landing there exactly, on every frame, for a target nowhere
+        # near it, is not a coincidence worth trusting.
+        if abs(crval1) < 1e-6 and abs(crval2) < 1e-6:
+            return WcsReport(path, False, note="WCS present but points at "
+                             "(0, 0) - a placeholder, not a real solve")
+        return WcsReport(path, True, crval1, crval2)
 
     hint = ""
     if h.get("OBJCTRA") or h.get("RA"):

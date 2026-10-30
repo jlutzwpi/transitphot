@@ -373,8 +373,9 @@ def measure(data: np.ndarray, positions: list[tuple[float, float]],
 
 def has_wcs(header) -> bool:
     """
-    True if the header carries an actual plate solution, not just mount
-    pointing.
+    True if the header carries an actual, usable plate solution.
+
+    Two separate failure modes, both checked here:
 
     ASIAIR/N.I.N.A. often write RA/DEC keywords (where the mount thinks it
     pointed) without ever writing CTYPE1/CTYPE2 (an astrometric solution).
@@ -384,9 +385,26 @@ def has_wcs(header) -> bool:
     look like a crash; it looks like every comparison star happening to
     fall off the sensor, which is a confusing way to discover the real
     problem. Check this before anything downstream of it runs.
+
+    Less obvious: CTYPE1/CTYPE2 (and the rest of the WCS keywords) can be
+    PRESENT with a placeholder value instead of a real solve - seen in the
+    wild as CRVAL1/CRVAL2 both exactly (0, 0), which N.I.N.A. embeds in
+    every sub and fills with this placeholder for a frame it never
+    individually solved. Structurally that looks identical to a real WCS;
+    only the actual sky position gives it away.
     """
-    return bool(str(header.get("CTYPE1", "")).strip()
-               and str(header.get("CTYPE2", "")).strip())
+    if not (str(header.get("CTYPE1", "")).strip()
+           and str(header.get("CTYPE2", "")).strip()):
+        return False
+    crval1 = header.get("CRVAL1")
+    crval2 = header.get("CRVAL2")
+    if crval1 is not None and crval2 is not None:
+        try:
+            if abs(float(crval1)) < 1e-6 and abs(float(crval2)) < 1e-6:
+                return False
+        except (TypeError, ValueError):
+            pass
+    return True
 
 
 def sky_to_pixel(header: dict, ra_deg: float, dec_deg: float):
