@@ -275,6 +275,25 @@ def calibrate_light(path: Path, master_bias: CCDData | None,
     if not had_wcs:
         for k in _WCS_KEYS:
             img.meta.pop(k, None)
+        # The header-text strip above isn't the whole story: CCDData keeps
+        # a SEPARATE .wcs attribute, and .write() serializes header cards
+        # from it independently of .meta - including DATE-OBS/MJD-OBS,
+        # which modern FITS WCS ties to the coordinate system. Root-caused
+        # on real data: ccdproc.combine() attaches a WCS to the master
+        # (CRVAL at the same (0, 0) placeholder, but carrying the MASTER
+        # BIAS's own real capture date via astropy's "datfix"), subtract_
+        # bias() then adopts that WCS onto the light's result since the
+        # light's own .wcs was None - and at write time that stale WCS's
+        # embedded date overwrote the DATE-OBS this function had just
+        # correctly restored into .meta two lines up. The in-memory
+        # object looked right at every step; only the file on disk was
+        # wrong, which is what made this so hard to catch - restoring
+        # .meta alone was fixing a field that .write() wasn't even using
+        # for this one. Confirmed on real data: without clearing .wcs here
+        # too, every one of 230 frames calibrated with real bias/dark/flat
+        # still came out with the bias library's April date instead of
+        # the October lights' own.
+        img.wcs = None
     return img
 
 
