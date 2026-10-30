@@ -99,6 +99,31 @@ def find_astap() -> str | None:
     return None
 
 
+def _astap_report(path: Path) -> dict[str, str] | None:
+    """
+    Parse ASTAP's own companion report (same basename, .ini extension).
+
+    Authoritative, and catches a failure mode neither the return code nor
+    the header can: seen in the wild on a real "Not enough stars" failure,
+    ASTAP exited 0 and -update still left the FITS file with a complete-
+    looking WCS (CRVAL at (0, 0), a placeholder) even though its own
+    report says PLTSOLVD=F. Both of this project's other signals said
+    "success" for a solve ASTAP itself explicitly failed.
+    """
+    report = path.with_suffix(".ini")
+    if not report.exists():
+        return None
+    out: dict[str, str] = {}
+    try:
+        for line in report.read_text(errors="replace").splitlines():
+            if "=" in line:
+                k, _, v = line.partition("=")
+                out[k.strip().upper()] = v.strip()
+    except Exception:                                    # noqa: BLE001
+        return None
+    return out
+
+
 def solve_file(path: Path, astap: str, ra_deg: float | None = None,
                dec_deg: float | None = None, radius_deg: float = 10.0,
                fov_deg: float | None = None, timeout: int = 120) -> bool:
@@ -107,7 +132,11 @@ def solve_file(path: Path, astap: str, ra_deg: float | None = None,
 
     Passing an approximate RA/Dec (from your TransitPlanner plan) and a
     search radius makes solving dramatically faster: ASTAP starts near the
-    right place instead of searching the whole sky.
+    right place instead of searching the whole sky. Passing fov_deg matters
+    even more than that: without it ASTAP has to guess the plate scale
+    blind, and a wrong guess (seen in the wild: "Very large FOV, use W08
+    database!" on a perfectly normal ~1 deg field) can fail a solve that a
+    correct scale hint would have found in seconds.
     """
     cmd = [astap, "-f", str(path), "-update"]
     if ra_deg is not None and dec_deg is not None:
@@ -124,6 +153,11 @@ def solve_file(path: Path, astap: str, ra_deg: float | None = None,
     if res.returncode != 0:
         msg = (res.stdout or res.stderr or "").strip().splitlines()
         print(f"[solve] {path.name}: failed ({msg[-1] if msg else 'no output'})")
+        return False
+    report = _astap_report(path)
+    if report is not None and report.get("PLTSOLVD", "").upper() not in ("T", "TRUE", "1"):
+        why = report.get("ERROR") or report.get("WARNING") or "PLTSOLVD=F"
+        print(f"[solve] {path.name}: failed ({why})")
         return False
     return inspect(path).has_wcs
 

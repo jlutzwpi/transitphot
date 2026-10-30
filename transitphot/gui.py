@@ -693,18 +693,53 @@ class App(tk.Tk):
         self.pending_plot = None
         self._launch(cmd, "Plate solving…")
 
+    def _header_from_frame(self) -> dict | None:
+        """First calibrated frame's header, for values the frame already
+        knows and nothing in this GUI ever asks the user to type."""
+        try:
+            from astropy.io import fits
+            d = Path(self._calibrated_dir())
+            for p in sorted(d.glob("*")):
+                if p.suffix.lower() in (".fits", ".fit", ".fts"):
+                    return dict(fits.getheader(p))
+        except Exception:                                # noqa: BLE001
+            pass
+        return None
+
     def _field_height_deg(self, v) -> float | None:
         """
         Field height in degrees, for the plate solver.
 
-        Needs the sensor's short dimension, which differs by camera: 15.7 mm
-        on an APS-C sensor like the ASI2600MM, 24 mm on a full-frame one like
-        the QHY600, 13.5 mm on a KAF-8300. Assuming one of them silently
-        mis-sizes the search on every other camera.
+        Both inputs are read from the frame itself when possible, not
+        typed in: no field in this GUI has ever asked for a focal length
+        (there's no "focal_length_mm" entry anywhere), which meant
+        `transitphot solve` could never pass a FOV hint to ASTAP for any
+        user, regardless of setup - confirmed on a real failure where
+        ASTAP, given no --fov, guessed wrong and failed with "Not enough
+        stars" on an entirely solvable ~1 deg field. FOCALLEN is reliably
+        in the header (and now survives calibration intact); sensor height
+        is derivable from XPIXSZ x NAXIS2 (both in the same binned frame
+        of reference, so this is correct regardless of binning mode) more
+        reliably than guessing a camera family's typical sensor size.
+        sensor_height_mm stays available as a manual override for a camera
+        or binning case where the header doesn't carry what's needed.
         """
         try:
             fl = float(v.get("focal_length_mm") or 0)
-            h = float(v.get("sensor_height_mm") or 15.7)
+            h_str = v.get("sensor_height_mm") or ""
+            h = float(h_str) if h_str else 0.0
+            if not (fl > 0) or not (h > 0):
+                hdr = self._header_from_frame()
+                if hdr is not None:
+                    if not (fl > 0):
+                        fl = float(hdr.get("FOCALLEN") or 0)
+                    if not (h > 0):
+                        xpixsz = float(hdr.get("XPIXSZ") or 0)
+                        naxis2 = float(hdr.get("NAXIS2") or 0)
+                        if xpixsz > 0 and naxis2 > 0:
+                            h = xpixsz * naxis2 / 1000.0
+            if not (h > 0):
+                h = 15.7
             return 57.3 * h / fl if fl > 0 and h > 0 else None
         except (TypeError, ValueError):
             return None
