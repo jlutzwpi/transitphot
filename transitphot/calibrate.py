@@ -224,6 +224,23 @@ def make_master_flat(flat_dir: Path, master_bias: CCDData | None = None,
 _POINTING_KEYS = ("RA", "DEC", "OBJCTRA", "OBJCTDEC", "OBJCTROT",
                   "FOCALLEN", "FOCRATIO", "TELESCOP")
 
+# A real astrometric solution, as opposed to the plain pointing keys above.
+# Confirmed on a user's setup (not reproducible on this project's own test
+# data/environment, so most likely a ccdproc/astropy version difference):
+# a light frame with NO WCS at all going in came out of calibrate_light()
+# with a complete-looking WCS pointing at (0, 0) - structurally valid,
+# astronomically a placeholder, and invisible to has_wcs() checks that
+# only verify the keywords exist. Whatever produces it, calibration has no
+# business adding a WCS that was never there - solving is a separate,
+# later step in this project's own workflow. If the input had none, strip
+# anything that appears after processing rather than trust it; if the
+# input already had a real one (someone re-calibrating pre-solved frames,
+# a valid workflow), leave it alone.
+_WCS_KEYS = ("CTYPE1", "CTYPE2", "CRVAL1", "CRVAL2", "CRPIX1", "CRPIX2",
+            "CD1_1", "CD1_2", "CD2_1", "CD2_2", "PC1_1", "PC1_2",
+            "PC2_1", "PC2_2", "CDELT1", "CDELT2", "CROTA1", "CROTA2",
+            "CUNIT1", "CUNIT2", "WCSAXES")
+
 
 def calibrate_light(path: Path, master_bias: CCDData | None,
                     master_dark: CCDData | None, master_flat: CCDData | None,
@@ -231,6 +248,7 @@ def calibrate_light(path: Path, master_bias: CCDData | None,
     """Apply available masters to a single light frame."""
     img = CCDData.read(path, unit="adu")
     original = {k: img.meta[k] for k in _POINTING_KEYS if k in img.meta}
+    had_wcs = bool(img.meta.get("CTYPE1")) and bool(img.meta.get("CTYPE2"))
     if master_bias is not None:
         img = ccdproc.subtract_bias(img, master_bias)
     if master_dark is not None:
@@ -242,6 +260,9 @@ def calibrate_light(path: Path, master_bias: CCDData | None,
         img = ccdproc.flat_correct(img, master_flat)
     for k, v in original.items():
         img.meta[k] = v
+    if not had_wcs:
+        for k in _WCS_KEYS:
+            img.meta.pop(k, None)
     return img
 
 
