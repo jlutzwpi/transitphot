@@ -134,7 +134,12 @@ def plot_lightcurve(bjd, flux, flux_err=None, fit_result=None,
         stats.append(f"depth {fit_result.depth_ppm:,.0f}±"
                      f"{fit_result.depth_err * 1e6:,.0f} ppm")
     if ld_fit is not None:
-        stats.append(f"(Rp/Rs)² {ld_fit.rp_rs ** 2:.4f}")
+        # (Rp/Rs)^2 is exactly ld_fit.depth_ppm/1e6 (see limbdark.py's own
+        # "catalog convention" depth), so its uncertainty is depth_err_ppm
+        # scaled the same way - reusing it keeps this consistent with the
+        # depth +/- already printed to the console for the same fit.
+        stats.append(f"(Rp/Rs)² {ld_fit.rp_rs ** 2:.4f}±"
+                     f"{ld_fit.depth_err_ppm / 1e6:.4f}")
     if stats:
         ax.text(0.5, 1.0, "   •   ".join(stats), transform=ax.transAxes,
                 ha="center", va="bottom", fontsize=8.5, color="#555",
