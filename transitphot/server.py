@@ -662,6 +662,49 @@ home screen. The address stays the same between restarts.</p>
             note += f" (matched '{name.strip()}')"
         return {"fields": f, "note": note}
 
+    def _fov_deg(v: dict, lights_root: str) -> float | None:
+        """
+        Field height in degrees, for the plate solver.
+
+        The web form collects focal_length_mm/sensor_height_mm and its own
+        hint text claims they're "used to size the plate-solve search" -
+        they weren't; nothing here ever read them, so `night`'s --fov was
+        always unset and ASTAP always solved blind (the same gap found and
+        fixed in the desktop GUI, independently, in this file).
+
+        A frame's own header is tried first when one already exists under
+        lights_root (sensor height from XPIXSZ x NAXIS2, correct for this
+        camera and this binning by construction) since a manually-typed
+        value can outlive the camera it was entered for. Falls back to the
+        form fields when no frame is available yet (a live run started
+        before any lights have synced) or the header lacks what's needed.
+        """
+        fl = h = 0.0
+        try:
+            from astropy.io import fits
+            root = Path(lights_root)
+            if root.exists():
+                for p in sorted(root.rglob("*")):
+                    if p.suffix.lower() in (".fits", ".fit", ".fts"):
+                        hdr = fits.getheader(p)
+                        fl = float(hdr.get("FOCALLEN") or 0)
+                        xpixsz = float(hdr.get("XPIXSZ") or 0)
+                        naxis2 = float(hdr.get("NAXIS2") or 0)
+                        if xpixsz > 0 and naxis2 > 0:
+                            h = xpixsz * naxis2 / 1000.0
+                        if fl > 0 or h > 0:
+                            break
+        except Exception:                                # noqa: BLE001
+            pass
+        try:
+            if not (fl > 0):
+                fl = float(v.get("focal_length_mm") or 0)
+            if not (h > 0):
+                h = float(v.get("sensor_height_mm") or 0)
+        except (TypeError, ValueError):
+            pass
+        return 57.3 * h / fl if fl > 0 and h > 0 else None
+
     @app.post("/api/start")
     async def start(request: Request):
         check(request)
@@ -695,6 +738,9 @@ home screen. The address stays the same between restarts.</p>
                           ("nina_api", "--nina-api")):
             if v.get(key):
                 cmd += [flag, v[key]]
+        fov = _fov_deg(v, v["lights_root"])
+        if fov:
+            cmd += ["--fov", f"{fov:.4f}"]
         # Site values come from the page (already saved above), falling back
         # to the settings file so a partly filled page still works.
         s = load_settings()
