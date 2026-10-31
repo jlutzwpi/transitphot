@@ -133,8 +133,14 @@ class App(tk.Tk):
         ttk.Entry(f_sync, textvariable=self.sync_vars["after_idle"], width=10).grid(
             row=3, column=1, sticky="w", **pad)
 
+        ttk.Label(f_sync, text="Pause between files (s)").grid(
+            row=4, column=0, sticky="w", **pad)
+        self.sync_vars["throttle"] = tk.StringVar(value="0.5")
+        ttk.Entry(f_sync, textvariable=self.sync_vars["throttle"], width=10).grid(
+            row=4, column=1, sticky="w", **pad)
+
         sbar = ttk.Frame(f_sync)
-        sbar.grid(row=4, column=0, columnspan=4, sticky="w", pady=(10, 2))
+        sbar.grid(row=5, column=0, columnspan=4, sticky="w", pady=(10, 2))
         self.btn_sync = ttk.Button(sbar, text="Start sync", command=self._sync)
         self.btn_sync.pack(side="left", padx=6)
         ttk.Button(sbar, text="Dry run",
@@ -150,10 +156,13 @@ class App(tk.Tk):
                        "large frames off the capture device\nwhile it is still "
                        "imaging competes with the camera and USB bus. Idle "
                        "detection starts the\ncopy once nothing has changed for "
-                       "the given number of minutes.\n\n"
+                       "the given number of minutes. The pause between files is "
+                       "the same\ncourtesy - lower it (or set it to 0) once the "
+                       "device is no longer actively imaging, if the console\n"
+                       "log shows it's a meaningful share of the total time.\n\n"
                        "The sync only runs while this window is open — use the "
                        "command line if you want to close it."
-                  ).grid(row=5, column=0, columnspan=4, sticky="w", **pad)
+                  ).grid(row=6, column=0, columnspan=4, sticky="w", **pad)
 
         # --- Folders tab ---
         f1 = ttk.Frame(nb)
@@ -917,10 +926,13 @@ class App(tk.Tk):
         cmd = self._base_cmd("sync") + ["--source", src, "--dest", dst]
         start = self.sync_vars["start"].get().strip()
         idle = self.sync_vars["after_idle"].get().strip()
+        throttle = self.sync_vars["throttle"].get().strip()
         if start:
             cmd += ["--start", start]
         if idle and float(idle) > 0:
             cmd += ["--after-idle", idle]
+        if throttle:
+            cmd += ["--throttle", throttle]
         if dry:
             cmd.append("--dry-run")
 

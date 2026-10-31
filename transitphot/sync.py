@@ -107,6 +107,14 @@ def copy_new(source: Path, dest: Path, throttle_s: float = 0.5,
 
     Returns (copied, skipped). A short pause between files keeps the copy
     from monopolising the source device even after the session has ended.
+
+    Reports throughput as it goes, split into transfer time and throttle
+    time: "slow" has two very different causes here (the source/network
+    path's own speed, versus this function's own deliberate per-file
+    pause) and a user watching the console has no way to tell them apart
+    without the split - throttle_s=0.5 between a night's worth of ~35MB
+    frames is a small fraction of total time, but on a slow link with many
+    small files it would not be, and only the numbers can say which.
     """
     source, dest = Path(source), Path(dest)
     files = _fits_files(source)
@@ -115,6 +123,8 @@ def copy_new(source: Path, dest: Path, throttle_s: float = 0.5,
         return 0, 0
 
     copied = skipped = 0
+    bytes_copied = 0
+    transfer_s = throttled_s = 0.0
     for i, src in enumerate(files, 1):
         rel = src.relative_to(source)
         out = dest / rel
@@ -138,18 +148,39 @@ def copy_new(source: Path, dest: Path, throttle_s: float = 0.5,
         out.parent.mkdir(parents=True, exist_ok=True)
         tmp = out.with_suffix(out.suffix + ".part")
         try:
+            size = src.stat().st_size
+            t0 = time.monotonic()
             shutil.copy2(src, tmp)
-            if tmp.stat().st_size != src.stat().st_size:
+            dt = time.monotonic() - t0
+            if tmp.stat().st_size != size:
                 raise OSError("size mismatch after copy")
             tmp.replace(out)
             copied += 1
+            bytes_copied += size
+            transfer_s += dt
         except Exception as exc:                        # noqa: BLE001
             print(f"  FAILED {rel}: {exc}")
             tmp.unlink(missing_ok=True)
             skipped += 1
 
         if copied % 10 == 0 and copied:
-            print(f"  copied {copied}/{len(files)}")
+            rate = bytes_copied / transfer_s / 1e6 if transfer_s else 0.0
+            print(f"  copied {copied}/{len(files)} — "
+                  f"{bytes_copied / 1e6:,.0f} MB at {rate:.1f} MB/s "
+                  f"transferring ({throttled_s:.0f}s spent in the "
+                  f"courtesy pause between files, not counted in that rate)")
+        t0 = time.monotonic()
         time.sleep(throttle_s)
+        throttled_s += time.monotonic() - t0
+
+    if copied and not dry_run:
+        rate = bytes_copied / transfer_s / 1e6 if transfer_s else 0.0
+        total_s = transfer_s + throttled_s
+        print(f"  done: {bytes_copied / 1e6:,.0f} MB in {total_s:.0f}s "
+              f"({rate:.1f} MB/s while actually transferring, "
+              f"{throttled_s:.0f}s / {100 * throttled_s / total_s:.0f}% "
+              f"of that was the courtesy pause between files, not copy "
+              f"time - pass --throttle 0 to skip it if the source isn't "
+              f"actively imaging anymore)")
 
     return copied, skipped
