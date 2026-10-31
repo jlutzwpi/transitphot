@@ -162,6 +162,75 @@ def _query_vizier_gaia(ra_deg, dec_deg, radius_arcmin, mag_limit,
     return out
 
 
+def _query_aip_gaia(ra_deg, dec_deg, radius_arcmin, mag_limit):
+    """
+    The same Gaia DR3 catalog and schema, served by AIP (Potsdam, Germany)
+    - a DPAC partner data center with its own independent copy of the
+    archive, not a proxy in front of ESA's. Confirmed live: the exact
+    query this module sends to ESA's own archive (same table name,
+    same columns) returns correct results here too, even while ESA's
+    own archive and CDS/VizieR were both struggling at once.
+
+    Queried with a plain HTTP request rather than astroquery's TapPlus
+    client: that client fails against this specific server with a 406
+    ("Could not satisfy the request Accept header") on both its sync
+    and async submission paths - a content-negotiation quirk of AIP's
+    TAP implementation the client doesn't handle, not a problem with
+    the data or the query itself. Parsed as VOTable regardless of the
+    FORMAT requested: this server returns VOTable XML either way (a
+    requested FORMAT=csv was silently ignored and came back as XML,
+    confirmed live), so ask astropy's own VOTable parser to read it
+    rather than fight the server's format negotiation. Its "source_id"
+    column also comes back renamed to "datalinkID" - a DataLink
+    convention on AIP's side, not a different quantity (confirmed by
+    the values being Gaia source IDs).
+
+    Returns None rather than raising, so the caller can fall through.
+    """
+    import io
+    import urllib.parse
+    import urllib.request
+
+    # TOP matters here beyond trimming the result: AIP's sync endpoint has
+    # its own server-side statement timeout, and an unbounded SELECT over
+    # this WHERE clause hit it (confirmed live: "canceling statement due
+    # to statement timeout") even for an ordinary field that returned
+    # only a few dozen rows once allowed to - a query-planning
+    # difference, not a genuinely large result. 3000 is comfortably
+    # above what a real comparison-star search radius returns in
+    # practice.
+    q = (f"SELECT TOP 3000 source_id, ra, dec, phot_g_mean_mag, bp_rp, "
+        f"ruwe, phot_variable_flag FROM gaiadr3.gaia_source WHERE "
+        f"1=CONTAINS(POINT('ICRS', ra, dec), "
+        f"CIRCLE('ICRS', {ra_deg}, {dec_deg}, {radius_arcmin / 60.0})) "
+        f"AND phot_g_mean_mag < {mag_limit}")
+    url = "https://gaia.aip.de/tap/sync?" + urllib.parse.urlencode({
+        "REQUEST": "doQuery", "LANG": "ADQL", "QUERY": q})
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "transitphot"})
+        with urllib.request.urlopen(req, timeout=120) as r:
+            payload = r.read()
+    except Exception:                                    # noqa: BLE001
+        return None
+
+    try:
+        from astropy.io.votable import parse_single_table
+        t = parse_single_table(io.BytesIO(payload)).to_table()
+        if len(t) == 0:
+            return None
+        id_col = "source_id" if "source_id" in t.colnames else "datalinkID"
+        out = Table()
+        out["source_id"] = np.asarray(t[id_col], dtype=np.int64)
+        out["ra"] = np.asarray(t["ra"], dtype=float)
+        out["dec"] = np.asarray(t["dec"], dtype=float)
+        out["phot_g_mean_mag"] = np.asarray(t["phot_g_mean_mag"], dtype=float)
+        out["bp_rp"] = np.asarray(t["bp_rp"], dtype=float)
+        out["ruwe"] = np.asarray(t["ruwe"], dtype=float)
+        out["phot_variable_flag"] = [str(x) for x in t["phot_variable_flag"]]
+    except Exception:                                    # noqa: BLE001
+        return None
+    return out
+
 
 def query_field(ra_deg: float, dec_deg: float, radius_arcmin: float = 20.0,
                 mag_limit: float = 16.0, attempts: int = 2,
@@ -241,13 +310,21 @@ def query_field(ra_deg: float, dec_deg: float, radius_arcmin: float = 20.0,
                 print(f"  VizieR {label} failed ({verr}); trying the next "
                       f"mirror")
             table = None
-        if table is None:
-            raise SystemExit(
-                f"Neither the Gaia archive nor VizieR answered ({last} / "
-                f"{verr}).\n"
-                f"The frames are fine — re-run this step when one of them "
-                f"is back.")
-        print(f"  VizieR returned {len(table)} sources")
+        if table is not None:
+            print(f"  VizieR returned {len(table)} sources")
+        else:
+            print(f"  VizieR unavailable too ({verr}); trying AIP's "
+                  f"independent copy of the archive")
+            table, aerr = _with_timeout(
+                lambda: _query_aip_gaia(ra_deg, dec_deg, radius_arcmin,
+                                        mag_limit), 130.0)
+            if table is None:
+                raise SystemExit(
+                    f"Neither the Gaia archive, VizieR, nor AIP answered "
+                    f"({last} / {verr} / {aerr}).\n"
+                    f"The frames are fine — re-run this step when one of "
+                    f"them is back.")
+            print(f"  AIP returned {len(table)} sources")
 
     if use_cache:
         try:
