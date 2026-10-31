@@ -93,7 +93,20 @@ def _with_timeout(fn, seconds: float):
 
 
 
-def _query_vizier_gaia(ra_deg, dec_deg, radius_arcmin, mag_limit):
+# CDS's own mirrors, in the order worth trying. Several historical
+# mirror hostnames (Cambridge, IUCAA) turned out to be dead - one
+# actively refuses the connection, the other's DNS doesn't resolve at
+# all anymore - not just slow, genuinely decommissioned, so they're not
+# worth a timeout's wait. Checked live rather than trusting old
+# references: on the day this was written, only the primary and Harvard
+# actually answered. This list is a reasonable bet, not a guarantee -
+# mirror uptime changes - but trying the dead ones costs a full timeout
+# each for nothing.
+_VIZIER_MIRRORS = ("vizier.cds.unistra.fr", "vizier.cfa.harvard.edu")
+
+
+def _query_vizier_gaia(ra_deg, dec_deg, radius_arcmin, mag_limit,
+                       server: str | None = None):
     """
     The same Gaia DR3 catalog, served by CDS instead of ESA.
 
@@ -102,14 +115,21 @@ def _query_vizier_gaia(ra_deg, dec_deg, radius_arcmin, mag_limit):
     is usually still answering. VizieR names the columns differently, so map
     them onto what the rest of this module expects.
 
+    `server` selects a specific VizieR mirror (see _VIZIER_MIRRORS) rather
+    than CDS's own primary host, for when CDS itself is the one having
+    trouble, not just ESA.
+
     Returns None rather than raising, so the caller can fall through.
     """
     try:
         from astroquery.vizier import Vizier
-        v = Vizier(columns=["Source", "RA_ICRS", "DE_ICRS", "Gmag", "BP-RP",
-                            "RUWE", "VarFlag"],
-                   column_filters={"Gmag": f"<{mag_limit}"},
-                   row_limit=-1, timeout=120)
+        kw = dict(columns=["Source", "RA_ICRS", "DE_ICRS", "Gmag", "BP-RP",
+                           "RUWE", "VarFlag"],
+                  column_filters={"Gmag": f"<{mag_limit}"},
+                  row_limit=-1, timeout=120)
+        if server:
+            kw["vizier_server"] = server
+        v = Vizier(**kw)
         res = v.query_region(SkyCoord(ra_deg * u.deg, dec_deg * u.deg),
                              radius=radius_arcmin * u.arcmin,
                              catalog="I/355/gaiadr3")
@@ -196,26 +216,37 @@ def query_field(ra_deg: float, dec_deg: float, radius_arcmin: float = 20.0,
     else:
         print(f"  Gaia archive unavailable ({last}); trying VizieR for the "
               f"same catalog")
-        # _query_vizier_gaia's own Vizier client is allowed up to 120s
-        # internally - timing the outer wait at the Gaia attempt's
-        # timeout_s (90s by default) raced it: a VizieR query answering
-        # anywhere between 90-120s, exactly within its own allowance,
-        # got reported as a failure here moments before it actually
-        # succeeded (seen in the wild - "Query finished" logged right
-        # after this path had already given up). Give the outer wait
-        # real margin over the inner client's own timeout instead of
-        # reusing an unrelated one.
-        table, verr = _with_timeout(
-            lambda: _query_vizier_gaia(ra_deg, dec_deg, radius_arcmin,
-                                       mag_limit), max(timeout_s, 130.0))
-        if verr is not None:
-            print(f"  VizieR also failed ({verr})")
+        table = None
+        verr = None
+        for mi, mirror in enumerate(_VIZIER_MIRRORS):
+            label = "primary" if mi == 0 else f"mirror {mirror}"
+            # _query_vizier_gaia's own Vizier client is allowed up to 120s
+            # internally - timing the outer wait at the Gaia attempt's
+            # timeout_s (90s by default) raced it: a VizieR query
+            # answering anywhere between 90-120s, exactly within its own
+            # allowance, got reported as a failure here moments before it
+            # actually succeeded (seen in the wild - "Query finished"
+            # logged right after this path had already given up). Give
+            # the outer wait real margin over the inner client's own
+            # timeout instead of reusing an unrelated one.
+            table, verr = _with_timeout(
+                lambda m=mirror: _query_vizier_gaia(
+                    ra_deg, dec_deg, radius_arcmin, mag_limit, server=m),
+                max(timeout_s, 130.0))
+            if table is not None and verr is None:
+                if mi > 0:
+                    print(f"  VizieR {label} answered")
+                break
+            if mi < len(_VIZIER_MIRRORS) - 1:
+                print(f"  VizieR {label} failed ({verr}); trying the next "
+                      f"mirror")
             table = None
         if table is None:
             raise SystemExit(
-                f"Neither the Gaia archive nor VizieR answered ({last}).\n"
-                f"The frames are fine — re-run this step when one of them is "
-                f"back.")
+                f"Neither the Gaia archive nor VizieR answered ({last} / "
+                f"{verr}).\n"
+                f"The frames are fine — re-run this step when one of them "
+                f"is back.")
         print(f"  VizieR returned {len(table)} sources")
 
     if use_cache:
