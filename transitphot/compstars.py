@@ -196,9 +196,18 @@ def query_field(ra_deg: float, dec_deg: float, radius_arcmin: float = 20.0,
     else:
         print(f"  Gaia archive unavailable ({last}); trying VizieR for the "
               f"same catalog")
+        # _query_vizier_gaia's own Vizier client is allowed up to 120s
+        # internally - timing the outer wait at the Gaia attempt's
+        # timeout_s (90s by default) raced it: a VizieR query answering
+        # anywhere between 90-120s, exactly within its own allowance,
+        # got reported as a failure here moments before it actually
+        # succeeded (seen in the wild - "Query finished" logged right
+        # after this path had already given up). Give the outer wait
+        # real margin over the inner client's own timeout instead of
+        # reusing an unrelated one.
         table, verr = _with_timeout(
             lambda: _query_vizier_gaia(ra_deg, dec_deg, radius_arcmin,
-                                       mag_limit), timeout_s)
+                                       mag_limit), max(timeout_s, 130.0))
         if verr is not None:
             print(f"  VizieR also failed ({verr})")
             table = None
