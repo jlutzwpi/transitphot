@@ -718,7 +718,23 @@ FITS_SUFFIXES = (".fit", ".fits", ".fts", ".fit.gz", ".fits.gz", ".fts.gz",
 
 
 def fits_files(directory, recursive: bool = False) -> list:
-    """Every FITS file in a directory, whatever spelling it uses."""
+    """
+    Every FITS file in a directory, whatever spelling it uses, in
+    chronological order.
+
+    Sorted by each frame's own DATE-OBS, not by filename. Capture software
+    commonly bakes local clock time into the filename (e.g.
+    ..._01-00-30_...), and a filename-string sort silently breaks across a
+    DST fallback: local time 1:00-1:59 AM happens twice that night, so two
+    real hours of frames both sort into the same "01-xx-xx" filename range
+    and interleave instead of forming two separate chronological blocks.
+    Caught on HAT-P-61 b, where roughly the session's middle third ended up
+    alternating between two clock-hours an hour apart - which corrupts
+    anything downstream that treats array-adjacent frames as time-adjacent
+    (transparency_mask's local trend window, most notably). A file whose
+    header can't be read sorts after every timed frame rather than
+    crashing the whole listing.
+    """
     d = Path(directory)
     it = d.rglob("*") if recursive else d.glob("*")
     out = []
@@ -733,7 +749,14 @@ def fits_files(directory, recursive: bool = False) -> list:
             continue
         if any(name.endswith(s) for s in FITS_SUFFIXES):
             out.append(p)
-    return sorted(out)
+
+    def _key(p):
+        try:
+            return (0, frame_time(fits.getheader(p)), p.name)
+        except Exception:                            # noqa: BLE001
+            return (1, 0.0, p.name)
+
+    return sorted(out, key=_key)
 
 
 def session_filter(paths, sample: int = 25) -> tuple:
