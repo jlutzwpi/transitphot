@@ -187,6 +187,17 @@ def fit(bjd, flux, flux_err=None, *, period: float,
     starts = [expected_mid] + list(np.linspace(bjd.min() + 0.15 * span,
                                                bjd.max() - 0.15 * span, 7))
     dur_width = duration_prior_hours if expected_duration_hours else None
+    # Same 15-minute trust level fitting.py's trapezoid search anchors its
+    # mid-time with (see its mid_prior_width) - a realistic uncertainty for
+    # a well-established, multi-epoch-refined published ephemeris. Without
+    # this, the trapezoid gets BOTH a hard-fixed duration (--fix-duration)
+    # and a soft mid-time prior, while this fit only had the former: nothing
+    # held mid-time near the ephemeris once optimization started, so it
+    # absorbed the full a/Rs-inclination-Rp/Rs degeneracy a single
+    # ground-based transit can't fully break. That asymmetry is why the LD
+    # mid-time uncertainty routinely came out 3x+ wider than the trapezoid's
+    # on real runs (HAT-P-61 b, KELT-1 b) even on otherwise-clean data.
+    mid_prior_width = 15.0 / 1440.0
 
     def resid_fn(pp):
         r = (flux - model(bjd, *pp)) / (sigma if sigma is not None else 1.0)
@@ -197,6 +208,7 @@ def fit(bjd, flux, flux_err=None, *, period: float,
                                    # geometry rather than let a NaN residual
                                    # through to the optimizer
             r = np.append(r, (dur - expected_duration_hours) / dur_width)
+        r = np.append(r, (pp[0] - expected_mid) / mid_prior_width)
         return r
 
     best = best_jac = None
@@ -222,6 +234,7 @@ def fit(bjd, flux, flux_err=None, *, period: float,
             dur = transit_duration_hours(period, popt[1], popt[2], popt[3])
             if np.isfinite(dur):
                 chi2_select += ((dur - expected_duration_hours) / dur_width) ** 2
+        chi2_select += ((popt[0] - expected_mid) / mid_prior_width) ** 2
         if chi2_select < best_chi2_select:
             best, best_jac, best_chi2_select = popt, result.jac, chi2_select
     if best is None:
