@@ -288,7 +288,12 @@ def cmd_run(args):
                 _wcs_hdrs.append(_hh)
         if not _wcs_hdrs:
             _wcs_hdrs = [_hdr]
-        margin = 60
+        # The whole sky annulus has to fit, not just the aperture: a star
+        # closer to the edge than R_OUT gets a clipped annulus, so its
+        # background comes from a lopsided patch of sky (or none at all).
+        # A fixed 60 px used to be enough, but at FWHM ~12 px the annulus
+        # reaches ~70 px. A few px extra covers centroid refinement shifts.
+        margin = max(60, int(np.ceil(R_OUT)) + 5)
 
         def _on_sensor_everywhere(c):
             for _hh in _wcs_hdrs:
