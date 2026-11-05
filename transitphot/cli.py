@@ -271,21 +271,47 @@ def cmd_run(args):
         _hdr = hdr0
         _data = fits.getdata(ref_path)
         _h, _w = _data.shape
+        # Checking the reference frame alone is not enough: after a meridian
+        # flip the mount re-centers, and the field can shift by many
+        # arcminutes. On Qatar-4 b the post-flip pointing moved ~9' north and
+        # every comparison the ensemble chose fell off the sensor for the
+        # whole second half — their summed flux collapsed, the transparency
+        # cut read that as cloud, and the egress was thrown away. So test
+        # each star against every solved frame's own WCS (headers only).
+        _wcs_hdrs = []
+        for _p in paths:
+            try:
+                _hh = fits.getheader(_p)
+            except Exception:                            # noqa: BLE001
+                continue
+            if ph.has_wcs(_hh):
+                _wcs_hdrs.append(_hh)
+        if not _wcs_hdrs:
+            _wcs_hdrs = [_hdr]
+        margin = 60
+
+        def _on_sensor_everywhere(c):
+            for _hh in _wcs_hdrs:
+                w_ = int(_hh.get("NAXIS1", _w)); h_ = int(_hh.get("NAXIS2", _h))
+                try:
+                    cx, cy = ph.sky_to_pixel(_hh, c.ra_deg, c.dec_deg)
+                except Exception:                        # noqa: BLE001
+                    return False
+                if not (margin <= cx <= w_ - margin and margin <= cy <= h_ - margin):
+                    return False
+            return True
+
         keep_comps, off, sat = [], [], []
         for c in comps:
-            try:
-                cx, cy = ph.sky_to_pixel(_hdr, c.ra_deg, c.dec_deg)
-            except Exception:                            # noqa: BLE001
+            if not _on_sensor_everywhere(c):
                 off.append(c); continue
-            margin = 60
-            if not (margin <= cx <= _w - margin and margin <= cy <= _h - margin):
-                off.append(c); continue
+            cx, cy = ph.sky_to_pixel(_hdr, c.ra_deg, c.dec_deg)
             if ph.looks_saturated(_data, (cx, cy)):
                 sat.append(c); continue
             keep_comps.append(c)
         if off:
             print(f"Dropping {len(off)} comparison star(s) that fall outside "
-                  f"the frame ({', '.join(f'G={c.mag:.2f} at {c.sep_arcmin:.1f}' + chr(39) for c in off)})")
+                  f"the frame in at least one pointing ({', '.join(f'G={c.mag:.2f} at {c.sep_arcmin:.1f}' + chr(39) for c in off)})")
         if sat:
             # Caught before spending a measurement pass on them, not after:
             # see looks_saturated's docstring for the HAT-P-53 b case this
@@ -313,7 +339,14 @@ def cmd_run(args):
     times, tflux, cflux = [], [], []
     ref_snapshot = None          # (data, header, positions, aperture radii)
     n_rejected = n_done = 0
+    n_unsolved = 0
+    piers = []                   # PIERSIDE per measured frame, if recorded
     for p, data, hdr in ph.iter_frames(paths):
+        # An unsolved frame's degenerate WCS maps every star to a pixel near
+        # the corner; measuring there is noise, not a stale-but-close guess.
+        if not ph.has_wcs(hdr):
+            n_unsolved += 1
+            continue
         try:
             tx, ty = ph.sky_to_pixel(hdr, args.ra, args.dec)
             positions = [(tx, ty)] + [ph.sky_to_pixel(hdr, c.ra_deg, c.dec_deg)
@@ -347,12 +380,37 @@ def cmd_run(args):
             ref_snapshot = (data, hdr, positions, (RADII[len(RADII)//2], R_IN, R_OUT))
         flux = ph.measure(data, positions, r_ap=RADII, r_in=R_IN, r_out=R_OUT)
         times.append(ph.frame_time(hdr))
+        piers.append(str(hdr.get("PIERSIDE", "") or "").strip().lower())
         tflux.append(flux[:, 0])           # (n_radii,)
         cflux.append(flux[:, 1:])          # (n_radii, n_comps)
         n_done += 1
         if n_done % 25 == 0:
             print(f"  measured {n_done}/{len(paths)} frames")
 
+    # When the mount actually flipped, from the frames themselves. The
+    # computed meridian crossing is only when it COULD flip: mounts wait out
+    # the current exposure and often a few minutes' grace past the meridian.
+    # On Qatar-4 b the crossing landed 7 min before the last pre-flip frame,
+    # so four West-side frames were modelled as post-flip and diluted the
+    # step. PIERSIDE is exact; the midpoint of the gap between the last frame
+    # on one side and the first on the other is the flip.
+    flip_jd_hdr = None
+    for i in range(1, len(piers)):
+        a, b = piers[i - 1], piers[i]
+        if a and b and a != b:
+            flip_jd_hdr = 0.5 * (times[i - 1] + times[i])
+            print(f"Meridian flip from PIERSIDE headers: {a} -> {b} "
+                  f"between frames at JD {times[i-1]:.5f} and {times[i]:.5f}")
+            break
+    if n_unsolved:
+        print(f"Skipped {n_unsolved} frame(s) with no plate solution")
+        if n_unsolved == len(paths):
+            raise SystemExit(
+                "Frames have no usable WCS. ASIAIR solves for pointing but "
+                "usually doesn't write a WCS into the subs.\n"
+                "  transitphot check --lights <dir>     # confirm\n"
+                f"  transitphot solve --lights <dir> --ra {args.ra} "
+                f"--dec {args.dec}")
     if not times:
         raise SystemExit(
             f"No frames could be measured — the target was not detectable at "
@@ -766,7 +824,8 @@ def cmd_run(args):
         flip_bjd = None
         if args.lat is not None and args.lon is not None:
             from .timing import meridian_crossing, jd_utc_to_bjd_tdb
-            mj = meridian_crossing(times, args.ra, args.lat, args.lon)
+            mj = (flip_jd_hdr if flip_jd_hdr is not None
+                  else meridian_crossing(times, args.ra, args.lat, args.lon))
             if mj is not None:
                 flip_bjd = float(jd_utc_to_bjd_tdb(
                     np.array([mj]), args.ra, args.dec,
@@ -931,7 +990,9 @@ def cmd_run(args):
                 from .timing import meridian_crossing
                 mer = None
                 if args.lat is not None and args.lon is not None:
-                    mer_jd = meridian_crossing(times, args.ra, args.lat, args.lon)
+                    mer_jd = (flip_jd_hdr if flip_jd_hdr is not None
+                              else meridian_crossing(times, args.ra,
+                                                     args.lat, args.lon))
                     if mer_jd is not None:
                         # convert to the same axis the curve is plotted on
                         from .timing import jd_utc_to_bjd_tdb

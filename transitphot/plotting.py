@@ -33,6 +33,22 @@ def plot_lightcurve(bjd, flux, flux_err=None, fit_result=None,
     )
     ax = axes[0] if show_resid else axes
 
+    # Remove the fitted meridian-flip offset from the DATA before anything is
+    # drawn. The step is real — the field lands on different pixels after
+    # the flip — but it is an instrumental offset, not something the planet
+    # did. This used to happen after the points and bins were already
+    # plotted, so the correction never reached the figure and the post-flip
+    # half sat visibly below a model that had no step in it.
+    corrected_note = None
+    flux_raw = flux              # the LD model carries its own step
+    if has_fit:
+        step = getattr(fit_result, "flip_step", 0.0)
+        fb = getattr(fit_result, "flip_bjd", None)
+        if fb and step:
+            flux = np.where(bjd > fb, flux / (1.0 + step), flux)
+            corrected_note = (f"flip offset of {step*1e6:+.0f} ppm removed "
+                              f"from the data")
+
     ax.plot(x, flux, ".", ms=3, color="#9aa4b8", alpha=0.6, label="frames")
 
     # time-binned points — what the eye should actually judge
@@ -65,24 +81,7 @@ def plot_lightcurve(bjd, flux, flux_err=None, fit_result=None,
 
     fine = np.linspace(bjd.min(), bjd.max(), 800)
     if has_fit:
-        # Draw the model that was actually fitted, step and all. A
-        # continuous curve over a discontinuous fit makes good data look
-        # offset and puts a false structure in the residuals.
-        # Show the curve with the flip offset removed from the DATA rather
-        # than drawn into the model. The step is real — the field lands on
-        # different pixels after the flip — but it is an instrumental
-        # offset, not something the planet did, and a reader comparing two
-        # halves of a night should not have to mentally subtract it.
-        step = getattr(fit_result, "flip_step", 0.0)
-        fb = getattr(fit_result, "flip_bjd", None)
-        if fb and step:
-            after = np.asarray(bjd) > fb
-            flux = np.where(after, flux / (1.0 + step), flux)
-            corrected_note = (f"flip offset of {step*1e6:+.0f} ppm removed "
-                              f"from the data")
-        else:
-            corrected_note = None
-
+        # The flip offset was already divided out of the data above.
         def _model(tt):
             # No step here: the data above has already been divided by it, so
             # the model must be continuous or the correction is applied twice.
@@ -140,6 +139,8 @@ def plot_lightcurve(bjd, flux, flux_err=None, fit_result=None,
         # depth +/- already printed to the console for the same fit.
         stats.append(f"(Rp/Rs)² {ld_fit.rp_rs ** 2:.4f}±"
                      f"{ld_fit.depth_err_ppm / 1e6:.4f}")
+    if corrected_note:
+        stats.append(corrected_note)
     if stats:
         ax.text(0.5, 1.0, "   •   ".join(stats), transform=ax.transAxes,
                 ha="center", va="bottom", fontsize=8.5, color="#555",
@@ -153,7 +154,9 @@ def plot_lightcurve(bjd, flux, flux_err=None, fit_result=None,
                      label="trapezoid")
         if ld_fit is not None and period:
             from .limbdark import model_curve as _mc
-            ld_resid = flux - _mc(bjd, ld_fit, period,
+            # model_curve includes the LD fit's own flip step, so compare it
+            # with the uncorrected data, not the trapezoid-corrected flux.
+            ld_resid = flux_raw - _mc(bjd, ld_fit, period,
                                   base=getattr(ld_fit, "baseline_flux", 1.0))
             axes[1].plot(x, ld_resid * 1e6, ".", ms=3, color="#2a6f97",
                          alpha=0.55, label="limb-darkened")
