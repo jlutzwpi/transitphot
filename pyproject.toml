@@ -18,8 +18,11 @@ dependencies = [
 # (sep builds from source). Plate solving with ASTAP is the better path.
 align = ["astroalign>=2.5"]
 # batman is the reference Mandel-Agol implementation and what AstroImageJ
-# uses. Optional: a numpy integrator covers the same physics without it.
-ld = ["batman-package>=2.4"]
+# uses. Optional: a numpy integrator covers the same physics without it
+# (agrees with batman to <20 ppm). batman ships source only, so Windows
+# needs the MSVC C++ Build Tools; and it imports distutils, which Python
+# 3.12+ only provides through setuptools.
+ld = ["batman-package>=2.4", "setuptools"]
 # Only needed for `transitphot serve`, the phone-friendly web front end.
 serve = ["fastapi>=0.110", "uvicorn>=0.27", "segno>=1.5"]
 

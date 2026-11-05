@@ -143,6 +143,21 @@ def fit(bjd, flux, flux_err=None, *, period: float,
     if sigma is not None and not np.all(np.isfinite(sigma) & (sigma > 0)):
         sigma = None
 
+    # Solve in days from a nearby origin, as fitting.trapezoid() does. With
+    # the raw BJD (~2.46e6) as a parameter, least_squares' finite-difference
+    # step is sqrt(eps) * |x| ~ 0.037 d — a 53-minute secant for a quantity
+    # measured to the minute. The Jacobian for mid-time was so coarse that a
+    # 17 ppm model difference (batman vs. the numpy integrator) sent the two
+    # backends to different minima 3.7 min apart on Qatar-4 b, with batman's
+    # the worse fit. Only differences t - mid enter the model, so shifting
+    # both by the same origin changes nothing but the conditioning.
+    origin = float(np.floor(bjd.min()))
+    bjd_abs = bjd
+    bjd = bjd - origin
+    expected_mid = expected_mid - origin
+    if flip_bjd is not None:
+        flip_bjd = float(flip_bjd) - origin
+
     rp0 = np.sqrt(expected_depth) if expected_depth else 0.12
     # a/Rs from the expected duration, if given; otherwise a typical hot-Jupiter
     if expected_duration_hours:
@@ -269,7 +284,7 @@ def fit(bjd, flux, flux_err=None, *, period: float,
     # incompatible quantities.
     central = 1.0 - float(_occulted_flux([0.0], rp, u1, u2)[0])
     return LimbDarkFit(
-        mid_bjd=float(mid), mid_err_days=float(perr[0]),
+        mid_bjd=float(mid) + origin, mid_err_days=float(perr[0]),
         rp_rs=float(rp), rp_rs_err=float(perr[1]),
         a_rs=float(a), inclination_deg=float(inc),
         depth_ppm=float(depth * 1e6), depth_err_ppm=float(depth_err * 1e6),
@@ -278,8 +293,8 @@ def fit(bjd, flux, flux_err=None, *, period: float,
         rms_ppm=float(np.std(resid) * 1e6),
         baseline_flux=float(popt[4]),
         flip_step=float(popt[-1]) if after_flip is not None else 0.0,
-        flip_bjd=(float(flip_bjd) if after_flip is not None else None),
-        n_points=len(bjd),
+        flip_bjd=(float(flip_bjd) + origin if after_flip is not None else None),
+        n_points=len(bjd_abs),
         u1=u1, u2=u2,
     )
 
