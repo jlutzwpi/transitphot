@@ -407,6 +407,15 @@ def cmd_run(args):
             print(f"Meridian flip from PIERSIDE headers: {a} -> {b} "
                   f"between frames at JD {times[i-1]:.5f} and {times[i]:.5f}")
             break
+    # Equally, if every frame records the SAME pier side, the mount did not
+    # flip — even if the target crossed the meridian (a mount set to track
+    # past it, or a field that culminated during the run). Falling back to
+    # the computed crossing there invents a step that never happened: WASP-10
+    # b was fitted with one, from frames that were all East.
+    no_flip_hdr = (flip_jd_hdr is None and len(piers) > 0
+                   and all(piers) and len(set(piers)) == 1)
+    if no_flip_hdr:
+        print(f"No meridian flip: every frame is pier side {piers[0]}")
     if n_unsolved:
         print(f"Skipped {n_unsolved} frame(s) with no plate solution")
         if n_unsolved == len(paths):
@@ -830,6 +839,7 @@ def cmd_run(args):
         if args.lat is not None and args.lon is not None:
             from .timing import meridian_crossing, jd_utc_to_bjd_tdb
             mj = (flip_jd_hdr if flip_jd_hdr is not None
+                  else None if no_flip_hdr
                   else meridian_crossing(times, args.ra, args.lat, args.lon))
             if mj is not None:
                 flip_bjd = float(jd_utc_to_bjd_tdb(
@@ -996,6 +1006,7 @@ def cmd_run(args):
                 mer = None
                 if args.lat is not None and args.lon is not None:
                     mer_jd = (flip_jd_hdr if flip_jd_hdr is not None
+                              else None if no_flip_hdr
                               else meridian_crossing(times, args.ra,
                                                      args.lat, args.lon))
                     if mer_jd is not None:
