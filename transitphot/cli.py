@@ -239,8 +239,11 @@ def cmd_run(args):
     if args.fwhm:
         fwhm = fwhm_max = args.fwhm
     else:
-        fwhm, fwhm_max = ph.session_fwhm(paths, _target_xy, report=True,
-                                         others_fn=_comp_xy)
+        fwhm, fwhm_max, blurred = ph.session_fwhm(
+            paths, _target_xy, report=True, others_fn=_comp_xy)
+        if blurred:
+            _drop = set(blurred)
+            paths = [p for p in paths if p not in _drop]
     if not args.fwhm and not (1.5 <= fwhm <= 12.0):
         print(f"WARNING: measured session FWHM {fwhm:.1f} px is outside the "
               f"usual 2-8 px range. Check the finder chart; override with "
@@ -650,7 +653,10 @@ def cmd_run(args):
             kept_idx = [int(pool_map[i]) for i in sel]
             comps = [comps[i] for i in sel]
             cflux = cflux[sel, :]
-            scatter_ppm = scatter_ppm[sel]
+            # Re-score among the stars actually used: the pool's numbers were
+            # measured against candidates the search just set aside, and these
+            # set the ensemble weights below.
+            scatter_ppm = cs.stability_report(cflux)
     elif len(comps) > args.n_comps:
         order = np.argsort(np.where(np.isfinite(scatter_ppm),
                                     scatter_ppm, np.inf))
@@ -660,7 +666,7 @@ def cmd_run(args):
         kept_idx = [int(pool_map[i]) for i in chosen]
         comps = [comps[i] for i in chosen]
         cflux = cflux[chosen, :]
-        scatter_ppm = scatter_ppm[chosen]
+        scatter_ppm = cs.stability_report(cflux)
 
     keep = cs.check_stability(cflux)
     print("Comparison star stability (differential scatter):")

@@ -630,19 +630,7 @@ def check_stability(fluxes: np.ndarray, threshold: float = 0.02) -> np.ndarray:
     if n_stars == 1:
         return np.array([True])
 
-    scatters = np.full(n_stars, np.nan)
-    for i in range(n_stars):
-        others = np.delete(fluxes, i, axis=0)
-        ensemble = np.nansum(others, axis=0)
-        with np.errstate(divide="ignore", invalid="ignore"):
-            ratio = fluxes[i] / ensemble
-        med = np.nanmedian(ratio)
-        if not np.isfinite(med) or med == 0:
-            continue
-        norm = ratio / med
-        # robust scatter: MAD isn't thrown off by a few bad frames
-        scatters[i] = 1.4826 * np.nanmedian(np.abs(norm - 1.0))
-
+    scatters = _differential_scatter(fluxes)
     finite = np.isfinite(scatters)
     keep = finite & (scatters < threshold)
     if keep.sum() == 0 and finite.any():
@@ -654,22 +642,40 @@ def check_stability(fluxes: np.ndarray, threshold: float = 0.02) -> np.ndarray:
     return keep
 
 
+def _differential_scatter(fluxes: np.ndarray) -> np.ndarray:
+    """
+    Each star's robust (MAD) scatter against the MEDIAN of the others'
+    median-normalized fluxes, as a fraction.
+
+    The reference used to be the plain sum of the others. A sum is dominated
+    by its brightest member, so one bright star drifting — on TOI-6303 b, a
+    15% walk across the meridian flip — moved every other star's reference by
+    nearly as much and charged that drift to all of them: genuinely steady
+    candidates at ~5,000 ppm were reported at 85,000-90,000, and those numbers
+    then set the ensemble weights. A median of normalized fluxes is common-
+    mode (transparency still divides out) but cannot be dragged by one star.
+    """
+    fluxes = np.asarray(fluxes, dtype=float)
+    n = fluxes.shape[0]
+    out = np.full(n, np.nan)
+    if n < 2:
+        return out
+    with np.errstate(divide="ignore", invalid="ignore"):
+        meds = np.nanmedian(fluxes, axis=1, keepdims=True)
+        norm = np.where(meds > 0, fluxes / meds, np.nan)
+        for i in range(n):
+            ref = np.nanmedian(np.delete(norm, i, axis=0), axis=0)
+            ratio = norm[i] / ref
+            m = np.nanmedian(ratio)
+            if np.isfinite(m) and m != 0:
+                # robust scatter: MAD isn't thrown off by a few bad frames
+                out[i] = 1.4826 * np.nanmedian(np.abs(ratio / m - 1.0))
+    return out
+
+
 def stability_report(fluxes: np.ndarray) -> np.ndarray:
     """Differential scatter per star, in ppm — for reporting to the user."""
-    fluxes = np.asarray(fluxes, dtype=float)
-    out = np.full(fluxes.shape[0], np.nan)
-    for i in range(fluxes.shape[0]):
-        others = np.delete(fluxes, i, axis=0)
-        if others.size == 0:
-            continue
-        ensemble = np.nansum(others, axis=0)
-        with np.errstate(divide="ignore", invalid="ignore"):
-            ratio = fluxes[i] / ensemble
-        med = np.nanmedian(ratio)
-        if np.isfinite(med) and med != 0:
-            norm = ratio / med
-            out[i] = 1.4826 * np.nanmedian(np.abs(norm - 1.0)) * 1e6
-    return out
+    return _differential_scatter(fluxes) * 1e6
 
 
 def color_extinction_coefficient(comp_flux: np.ndarray, colors: np.ndarray,

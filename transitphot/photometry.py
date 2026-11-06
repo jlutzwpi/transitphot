@@ -116,7 +116,10 @@ def session_fwhm(paths, positions_fn, sample: int = 100_000,
     """
     One FWHM for the whole session, scanning every frame.
 
-    Returns (fwhm, fwhm_max): fwhm sizes the aperture ladder itself (the
+    Returns (fwhm, fwhm_max, blurred). blurred lists isolated frames whose
+    every star is far wider than the rest of the night (see the end of this
+    function); the caller drops them, and fwhm_max is measured without
+    them. fwhm sizes the aperture ladder itself (the
     80th percentile, below); fwhm_max is the single widest value measured
     anywhere in the session, and exists so a caller choosing the FINAL
     aperture from that ladder can refuse to go narrower than the worst
@@ -152,6 +155,7 @@ def session_fwhm(paths, positions_fn, sample: int = 100_000,
     the more honest number.
     """
     vals, tgt_vals, all_vals = [], [], []
+    frame_paths, frame_stars = [], []
     # Evenly spaced indices spanning the FULL session, both endpoints
     # included. The previous stride-then-truncate approach (paths[::step]
     # [:sample]) silently dropped the tail of the session whenever the
@@ -189,6 +193,8 @@ def session_fwhm(paths, positions_fn, sample: int = 100_000,
                 pass
         if here:
             vals.append(float(np.median(here)))
+            frame_paths.append(p)
+            frame_stars.append(here)
             # Every individual star's own FWHM, not just the per-frame
             # median across them — a single star having a bad moment (one
             # star's PSF spiking while the others stay normal) is exactly
@@ -207,7 +213,7 @@ def session_fwhm(paths, positions_fn, sample: int = 100_000,
             print(f"WARNING: no star found at the target position in any "
                   f"sampled frame — falling back to FWHM {default} px. "
                   f"Check that the coordinates match this data.")
-        return default, default
+        return default, default, []
 
     if report and tgt_vals and len(vals) >= 3:
         t = float(np.median(tgt_vals))
@@ -218,10 +224,38 @@ def session_fwhm(paths, positions_fn, sample: int = 100_000,
                   f"it is probably close to the top of the well. Using the "
                   f"field value; consider shorter subs.")
 
+    # A frame where EVERY star is blurred far past the rest of the night is
+    # a whole-frame event — the mount still settling after the first slew,
+    # a focuser move, wind — not seeing. On both TOI-6303 b and HAT-P-28 b
+    # it was frame #1, every star at 11-12 px against a 7 px night and a
+    # next-worst frame near 10 px. Letting that one frame size the floor
+    # forced the widest, noisiest aperture on all the others (19.9 px on
+    # TOI-6303 b, worst on the scan by 3x). Measuring it with a sensible
+    # aperture would undercount its flux instead, so the caller drops it.
+    # Only isolated frames qualify: a sustained stretch of poor seeing
+    # (WASP-10 b's early frames) is real and must still set the floor.
+    vals_arr = np.asarray(vals)
+    blurred_idx = []
+    if vals_arr.size >= 20:
+        cut = 1.25 * float(np.percentile(vals_arr, 95))
+        cand = np.flatnonzero(vals_arr > cut)
+        if 0 < cand.size <= max(2, int(0.05 * vals_arr.size)):
+            blurred_idx = [int(i) for i in cand]
+    blurred = [frame_paths[i] for i in blurred_idx]
+    if blurred and report:
+        print(f"Dropping {len(blurred)} frame(s) blurred far past the rest of "
+              f"the night (whole-frame FWHM above {cut:.1f} px):")
+        for i in blurred_idx:
+            print(f"  {frame_paths[i].name}  {vals_arr[i]:.2f} px")
+    keep_vals = [x for i, f in enumerate(frame_stars) if i not in blurred_idx
+                 for x in f]
+    floor_vals = keep_vals or all_vals
+
     # 80th percentile of the per-frame medians sizes the ladder — a stable,
     # representative scale. The worst single star-frame value (not the
     # worst per-frame median) is what the floor needs: see all_vals above.
-    return float(np.percentile(vals, 80)), float(np.max(all_vals))
+    return (float(np.percentile(vals, 80)), float(np.max(floor_vals)),
+            blurred)
 
 
 def iter_frames(paths: list[Path]):
@@ -524,11 +558,25 @@ def clean_curve(times, flux, err=None, sigma: float = 5.0):
     if good.sum() < 5:
         return good
 
-    med = np.median(flux[good])
-    mad = 1.4826 * np.median(np.abs(flux[good] - med))
+    # Judge each point against a running median of its neighbours, not the
+    # curve's global median. The transit itself is far from the global
+    # median, so on a deep one it inflated the MAD until a +5.9% frame on
+    # WASP-10 b (3% transit) sat right at the 5-sigma line: whether it got
+    # clipped flipped with tiny changes to the ensemble weights. A running
+    # median follows the dip and the baseline, so only the point-to-point
+    # scatter sets the threshold. The window is short next to any ingress.
+    idx = np.flatnonzero(good)
+    order = idx[np.argsort(times[idx])]
+    f = flux[order]
+    half = 3
+    local = np.array([np.median(f[max(0, i - half):i + half + 1])
+                      for i in range(f.size)])
+    resid = f - local
+    mad = 1.4826 * np.median(np.abs(resid - np.median(resid)))
     if mad <= 0:
         return good
-    good &= np.abs(flux - med) < sigma * mad
+    bad = order[np.abs(resid) >= sigma * mad]
+    good[bad] = False
     return good
 
 
