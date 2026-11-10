@@ -46,6 +46,14 @@ settings persist between sessions. Tkinter only, no extra dependencies.
 
     pip install -e .
 
+### Windows, without Python
+
+`packaginguild.ps1` builds a folder with `transitphot.exe` (the GUI) and
+`transitphot-cli.exe`, zipped as `dist	ransitphot-<version>-windows.zip`,
+for observers who don't want to install Python. ASTAP is still a separate
+install. See `packaging/README-windows.md`, which ships in the zip as
+`READ ME FIRST.txt`.
+
 ## Use
 
     # 1. Calibrate a night

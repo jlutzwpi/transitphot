@@ -720,7 +720,8 @@ home screen. The address stays the same between restarts.</p>
 
         name = v.get("target_name") or "target"
         stem = name.replace(" ", "_")
-        cmd = [sys.executable, "-m", "transitphot.cli", "night",
+        from . import cli_command
+        cmd = cli_command() + ["night",
                "--lights-root", v["lights_root"],
                "--ra", v["ra"], "--dec", v["dec"],
                "--target-mag", v["target_mag"],

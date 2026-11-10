@@ -669,7 +669,8 @@ class App(tk.Tk):
 
     # ---------------- running ----------------
     def _base_cmd(self, sub):
-        return [sys.executable, "-m", "transitphot.cli", sub]
+        from . import cli_command
+        return cli_command() + [sub]
 
     def _calibrate(self):
         lights = self.vars["lights"].get().strip()
