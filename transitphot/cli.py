@@ -816,6 +816,7 @@ def cmd_run(args):
               "required for ExoClock/AAVSO submission.")
 
     # --- fit ---
+    res = ld_result = air = flip_bjd = None
     if args.fit:
         from .fitting import fit as fit_transit, o_minus_c_minutes
 
@@ -1037,6 +1038,40 @@ def cmd_run(args):
         except Exception as exc:                        # noqa: BLE001
             print(f"WARNING: could not write outputs or plot ({exc}).")
             print("The fitted values printed above are still valid.")
+
+    # --- AstroImageJ hand-off: the same stars and apertures, ready to load ---
+    try:
+        from . import aij
+        if flip_bjd is None and flip_jd_hdr is not None \
+                and args.lat is not None and args.lon is not None:
+            from .timing import jd_utc_to_bjd_tdb
+            flip_bjd = float(jd_utc_to_bjd_tdb(
+                np.array([flip_jd_hdr]), args.ra, args.dec,
+                args.lat, args.lon, args.elevation)[0])
+        used = [i for i, w in enumerate(weights) if w > 0]
+        aij_comps = [comps[i] for i in used]
+        base = Path(args.out).with_suffix("")
+        radec = aij.write_radec(base.with_name(base.name + "_aij.radec"),
+                                args.ra, args.dec, args.target_mag, aij_comps)
+        pred_bjd = (pred if args.fit and args.predicted_mid
+                    else args.predicted_mid)
+        settings = aij.write_settings(
+            base.with_name(base.name + "_aij_settings.txt"),
+            target=args.target_name or f"RA {args.ra} Dec {args.dec}",
+            lights=str(args.lights), radec_name=radec.name,
+            ra_deg=args.ra, dec_deg=args.dec, lat=args.lat, lon=args.lon,
+            elevation=args.elevation,
+            r_ap=RADII[best_i], r_in=R_IN, r_out=R_OUT,
+            comps=aij_comps, weights=[weights[i] for i in used],
+            n_points=len(times), period=args.period_days,
+            duration_h=args.duration_hours, depth_ppm=args.depth_ppm,
+            predicted_mid=pred_bjd, flip_bjd=flip_bjd,
+            bjd_span=(float(np.min(bjd)), float(np.max(bjd))),
+            airmass_used=air is not None, trap=res, ld=ld_result)
+        print(f"  wrote {radec.name} + {settings.name} (AstroImageJ hand-off)")
+    except Exception as exc:                            # noqa: BLE001
+        print(f"WARNING: could not write the AstroImageJ files "
+              f"({type(exc).__name__}: {exc}).")
 
 def cmd_sync(args):
     from .sync import copy_new, wait_until_clock, wait_until_idle, _fits_files
