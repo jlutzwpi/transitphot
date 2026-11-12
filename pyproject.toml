@@ -1,6 +1,6 @@
 [project]
 name = "transitphot"
-version = "0.1.0"
+version = "0.1.1"
 description = "Local FITS-to-light-curve pipeline for exoplanet transit photometry"
 requires-python = ">=3.10"
 dependencies = [
@@ -35,3 +35,7 @@ transitphot-gui = "transitphot.gui:main"
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
+
+# packaging/ holds the Windows build scripts, not a package to install.
+[tool.setuptools.packages.find]
+include = ["transitphot*"]
