@@ -7,6 +7,21 @@ from pathlib import Path
 import numpy as np
 
 
+def _tc_text(name, fit, predicted_mid) -> str | None:
+    """'Tc (name) <BJD> ± err min, O−C ±x.xx min', so the plot alone answers
+    "when was mid-transit?" without the log or summary."""
+    tc = getattr(fit, "mid_bjd", None)
+    if tc is None or not np.isfinite(tc):
+        return None
+    s = f"{name} Tc {tc:.5f}"
+    err = getattr(fit, "mid_err_minutes", None)
+    if err is not None and np.isfinite(err):
+        s += f" ± {err:.1f} min"
+    if predicted_mid is not None:
+        s += f", O−C {(tc - predicted_mid) * 1440:+.2f} min"
+    return s
+
+
 def plot_lightcurve(bjd, flux, flux_err=None, fit_result=None,
                     title: str = "", out: Path = Path("lightcurve.png"),
                     bin_minutes: float = 5.0,
@@ -120,7 +135,15 @@ def plot_lightcurve(bjd, flux, flux_err=None, fit_result=None,
 
     ax.set_ylabel("normalized flux")
     ax.legend(frameon=False, fontsize=9)
-    ax.set_title(title or "Transit light curve", pad=20)
+    # Mid-transit times get their own line under the stats: they are what
+    # timing observers ask for first, and the legend has no room for them.
+    tc_lines = [(t, c, x, ha) for t, c, x, ha in (
+        (_tc_text("trapezoid", fit_result, predicted_mid) if has_fit else None,
+         "#c1121f", 0.0, "left"),
+        (_tc_text("limb-darkened", ld_fit, predicted_mid)
+         if ld_fit is not None else None, "#2a6f97", 1.0, "right"),
+    ) if t]
+    ax.set_title(title or "Transit light curve", pad=34 if tc_lines else 20)
 
     # A quick-glance summary under the title: whether there's a detection
     # at all (SNR), how deep (depth), and how big the planet is relative
@@ -142,9 +165,13 @@ def plot_lightcurve(bjd, flux, flux_err=None, fit_result=None,
     if corrected_note:
         stats.append(corrected_note)
     if stats:
-        ax.text(0.5, 1.0, "   •   ".join(stats), transform=ax.transAxes,
-                ha="center", va="bottom", fontsize=8.5, color="#555",
-                style="italic")
+        ax.text(0.5, 1.0 + (0.035 if tc_lines else 0.0), "   •   ".join(stats),
+                transform=ax.transAxes, ha="center", va="bottom",
+                fontsize=8.5, color="#555", style="italic")
+    # Colored like the fit curves: trapezoid at left, limb-darkened at right.
+    for text, color, xpos, ha in tc_lines:
+        ax.text(xpos, 1.0, text, transform=ax.transAxes, ha=ha, va="bottom",
+                fontsize=8.5, color=color)
 
     ax.grid(alpha=0.15)
 
