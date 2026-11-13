@@ -1,6 +1,6 @@
 [project]
 name = "transitphot"
-version = "0.1.1"
+version = "0.1.2"
 description = "Local FITS-to-light-curve pipeline for exoplanet transit photometry"
 requires-python = ">=3.10"
 dependencies = [

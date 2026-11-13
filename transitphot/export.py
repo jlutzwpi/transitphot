@@ -107,6 +107,8 @@ def write_summary(path: Path, fit, meta: dict, predicted_mid_bjd=None) -> Path:
         "n_points": fit.n_points,
         **meta,
     }
+    if getattr(fit, "mid_alt_bjd", None) is not None:
+        out["alternate_mid_bjd_tdb"] = round(fit.mid_alt_bjd, 6)
     if predicted_mid_bjd:
         out["predicted_mid_bjd_tdb"] = round(predicted_mid_bjd, 6)
         out["o_minus_c_minutes"] = round(

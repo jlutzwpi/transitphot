@@ -867,6 +867,11 @@ def cmd_run(args):
         print(f"  depth        {res.depth_ppm:.0f} ± {res.depth_err*1e6:.0f} ppm")
         print(f"  duration     {res.duration_days*24:.2f} h")
         print(f"  residual RMS {res.rms_ppm:.0f} ppm")
+        if getattr(res, "mid_alt_bjd", None) is not None:
+            print(f"  WARNING: a second solution at {res.mid_alt_bjd:.5f} BJD_TDB "
+                  f"({(res.mid_alt_bjd - res.mid_bjd) * 1440:+.1f} min) fits "
+                  "within 1 sigma of the best; the mid-time error has been "
+                  "widened to cover both.")
         if getattr(res, "flip_step", 0.0):
             print(f"  meridian flip step {res.flip_step*1e6:+.0f} ppm "
                   f"(field lands on different pixels after the flip)")

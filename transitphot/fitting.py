@@ -41,6 +41,9 @@ class TransitFit:
     baseline_model: str
     rms_ppm: float
     n_points: int
+    # Set when a second, separate solution fits about as well (within 1
+    # sigma) at a different mid-time; mid_err_days then covers both.
+    mid_alt_bjd: float | None = None
 
     @property
     def mid_err_minutes(self) -> float:
@@ -289,6 +292,10 @@ def fit(bjd: np.ndarray, flux: np.ndarray, flux_err: np.ndarray | None = None,
     air = air_full if use_air else None
     baseline_model = label
 
+    best, mid_alt = _profile_mid(
+        x, flux, sigma, best, lo, hi, mid0, mid_prior_width,
+        lambda tt, pp: _evaluate(tt, pp, use_air, air, after_flip))
+
     # Uncertainties: the robust (soft_l1) loss finds parameter values that
     # outliers can't dictate, but its covariance is not a meaningful error
     # estimate. So re-fit with ordinary least squares, starting from the
@@ -318,6 +325,11 @@ def fit(bjd: np.ndarray, flux: np.ndarray, flux_err: np.ndarray | None = None,
     if not np.all(np.isfinite(perr)) or perr[0] > span_days:
         perr = _bootstrap_errors(x, flux, best, lo, hi, sigma,
                                  model_fn=model_fn)
+    if mid_alt is not None:
+        # Two solutions fit equally well; which one wins can turn on the
+        # last bits of the input. The honest mid-time error spans both.
+        perr = np.array(perr, dtype=float)
+        perr[0] = max(float(perr[0]), abs(mid_alt - float(best[0])))
 
     return TransitFit(
         mid_bjd=float(best[0]) + origin, mid_err_days=float(perr[0]),
@@ -330,7 +342,112 @@ def fit(bjd: np.ndarray, flux: np.ndarray, flux_err: np.ndarray | None = None,
         flip_bjd=(float(flip_bjd) if after_flip is not None else None),
         baseline_model=baseline_model,
         rms_ppm=float(np.std(best_resid) * 1e6), n_points=len(x),
+        mid_alt_bjd=(mid_alt + origin if mid_alt is not None else None),
     )
+
+
+def _profile_mid(x, flux, sigma, best, lo, hi, mid0, mid_prior_width,
+                 evaluate, half_window_min: float = 10.0,
+                 step_min: float = 0.25):
+    """
+    Map the fit quality against mid-time around the multi-start winner.
+
+    The multi-start search can miss a second solution entirely, and when two
+    solutions fit almost equally well, a change in the 13th digit of the
+    input decides which one it reports (seen on GPX-1 b, where a meridian
+    flip mid-transit lets the flip step trade against depth and timing: two
+    minima 1.45 min apart, under 1 sigma different). A fixed grid in
+    mid-time, with every other parameter re-fitted at each step, sees both
+    regardless of where the starts happened to land.
+
+    Returns (best, alt_mid): best is replaced by a polished grid solution if
+    the grid found a better one; alt_mid is the mid-time (in x units) of a
+    separate minimum within 1 sigma of the best, or None.
+    """
+    w = sigma if sigma is not None else 1.0
+    lo_r, hi_r = np.asarray(lo[1:], float), np.asarray(hi[1:], float)
+
+    def metric(pp):
+        m = float(np.sum(((flux - evaluate(x, pp)) / w) ** 2))
+        if mid_prior_width is not None:
+            m += ((pp[0] - mid0) / mid_prior_width) ** 2
+        return m
+
+    def fit_at(tc, start):
+        q0 = np.clip(np.asarray(start[1:], float), lo_r, hi_r)
+        try:
+            r = least_squares(
+                lambda q: (flux - evaluate(x, np.concatenate([[tc], q]))) / w,
+                q0, bounds=(lo_r, hi_r), loss="soft_l1", f_scale=0.01,
+                max_nfev=5000)
+        except Exception:                               # noqa: BLE001
+            return None, np.inf
+        pp = np.concatenate([[tc], r.x])
+        return pp, metric(pp)
+
+    best = np.asarray(best, float)
+    m_best = metric(best)
+    step, half = step_min / 1440.0, half_window_min / 1440.0
+    k = int(round(half / step))
+    grid = best[0] + step * np.arange(-k, k + 1)
+    inside = (grid > lo[0]) & (grid < hi[0])
+    # Sweep outward from the winner, warm-starting each point from its
+    # neighbor, so the profile follows a basin continuously.
+    prof = np.full(len(grid), np.inf)
+    sols = [None] * len(grid)
+    for order in (range(k, len(grid)), range(k, -1, -1)):
+        prev = best
+        for i in order:
+            if not inside[i]:
+                break
+            pp, m = fit_at(grid[i], prev)
+            if pp is None:
+                break
+            sols[i], prof[i] = pp, m
+            prev = pp
+
+    i_min = int(np.argmin(prof))
+    if np.isfinite(prof[i_min]) and prof[i_min] < m_best - 1e-9 * abs(m_best):
+        # The grid found a better basin than any start did: polish it.
+        def resid(pp):
+            r = (flux - evaluate(x, pp)) / w
+            if mid_prior_width is not None:
+                r = np.append(r, (pp[0] - mid0) / mid_prior_width)
+            return r
+        p0 = np.clip(sols[i_min], lo, hi)
+        try:
+            r = least_squares(resid, p0, bounds=(lo, hi), loss="soft_l1",
+                              f_scale=0.01, max_nfev=20000)
+            if metric(r.x) < m_best:
+                best, m_best = np.asarray(r.x, float), metric(r.x)
+        except Exception:                               # noqa: BLE001
+            pass
+
+    # "Within 1 sigma": delta chi-square below 1 after scaling by the
+    # reduced chi-square, since the per-point errors understate the scatter
+    # on most nights.
+    n_free = len(best)
+    dof = max(len(x) - n_free, 1)
+    red = max(float(np.sum(((flux - evaluate(x, best)) / w) ** 2)) / dof, 1e-30)
+    m_floor = min(m_best, float(np.min(prof)))
+    ok = np.isfinite(prof) & ((prof - m_floor) / red <= 1.0)
+    # Group the acceptable grid points into contiguous runs; more than one
+    # run means a separate minimum, not just a broad one.
+    runs, cur = [], []
+    for i in range(len(grid)):
+        if ok[i]:
+            cur.append(i)
+        elif cur:
+            runs.append(cur)
+            cur = []
+    if cur:
+        runs.append(cur)
+    if len(runs) < 2:
+        return best, None
+    home = min(runs, key=lambda r: np.min(np.abs(grid[r] - best[0])))
+    others = [i for r in runs if r is not home for i in r]
+    j = min(others, key=lambda i: prof[i])
+    return best, float(grid[j])
 
 
 def o_minus_c_minutes(observed_mid_bjd: float, predicted_mid_bjd: float
