@@ -27,7 +27,10 @@ Copy-Item (Join-Path $PSScriptRoot "README-windows.md") (Join-Path $app "READ ME
 & (Join-Path $app "transitphot-cli.exe") --help | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "transitphot-cli.exe failed to start" }
 
-$version = (& $py -c "import importlib.metadata as m; print(m.version('transitphot'))").Trim()
+# Read the version from pyproject.toml, not the installed metadata: a stale
+# install record (or the repo's own transitphot.egg-info) can name an older
+# release, and the zip would then overwrite that release's file.
+$version = (& $py -c "import tomllib; print(tomllib.load(open(r'$root\pyproject.toml','rb'))['project']['version'])").Trim()
 $zip = Join-Path $root "dist\transitphot-$version-windows.zip"
 if (Test-Path $zip) { Remove-Item $zip }
 Compress-Archive -Path $app -DestinationPath $zip
