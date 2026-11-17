@@ -886,9 +886,19 @@ def cmd_run(args):
         ld_result = None
         if args.model in ("ld", "both") and args.period_days:
             from . import limbdark as _ld
+            # A flip inside the transit (first to fourth contact, plus 15 min
+            # either side) lets a free step trade against the transit shape,
+            # so hold it at the trapezoid's value, which a hard-fixed
+            # duration keeps honest. Outside the transit the step is
+            # measured on baseline alone and is safe to fit.
+            hold_step = None
+            if flip_bjd is not None and getattr(res, "flip_step", 0.0):
+                half = res.duration_days / 2 + 15 / 1440
+                if abs(flip_bjd - res.mid_bjd) <= half:
+                    hold_step = res.flip_step
             try:
                 lf = _ld.fit(bjd, norm, err, period=args.period_days,
-                             flip_bjd=flip_bjd,
+                             flip_bjd=flip_bjd, flip_step_fixed=hold_step,
                              expected_mid=(args.predicted_mid
                                            or float(np.median(bjd))),
                              expected_depth=(args.depth_ppm / 1e6
@@ -908,6 +918,19 @@ def cmd_run(args):
                       f"i {lf.inclination_deg:.2f} deg")
                 print(f"    duration     {lf.duration_hours:.2f} h")
                 print(f"    residual RMS {lf.rms_ppm:.0f} ppm")
+                if lf.flip_step_held:
+                    print(f"    flip step    {lf.flip_step*1e6:+.0f} ppm, held at "
+                          f"the trapezoid's value (the flip falls during the "
+                          f"transit, where a free step trades against its shape)")
+                elif lf.flip_step:
+                    print(f"    flip step    {lf.flip_step*1e6:+.0f} ppm")
+                if (args.duration_hours and np.isfinite(lf.duration_hours)
+                        and abs(lf.duration_hours - args.duration_hours)
+                        > 0.10 * args.duration_hours):
+                    print(f"    WARNING: limb-darkened duration "
+                          f"{lf.duration_hours:.2f} h is more than 10% from the "
+                          f"catalog {args.duration_hours:.2f} h; its geometry "
+                          f"(and so its mid-time) is suspect on this night")
                 if args.predicted_mid:
                     print(f"    O-C          "
                           f"{(lf.mid_bjd - args.predicted_mid) * 1440:+.2f} min")

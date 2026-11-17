@@ -50,6 +50,12 @@ class LimbDarkFit:
     n_points: int
     u1: float
     u2: float
+    # The baseline polynomial, in (t - mid) days. Without these the plot drew
+    # a model that was never fitted: on TOI-6303 b the fit's baseline rose
+    # ~9000 ppm through egress and the drawn curve sat far from the data.
+    baseline_slope: float = 0.0
+    baseline_curve: float = 0.0
+    flip_step_held: bool = False   # step taken from the trapezoid, not fitted
 
     @property
     def mid_err_minutes(self) -> float:
@@ -113,6 +119,7 @@ def fit(bjd, flux, flux_err=None, *, period: float,
         expected_duration_hours: float | None = None,
         u1: float = 0.35, u2: float = 0.25,
         flip_bjd: float | None = None,
+        flip_step_fixed: float | None = None,
         duration_prior_hours: float = 0.25) -> LimbDarkFit:
     """
     Fit the Mandel-Agol model. `period` is required — the model needs it to
@@ -178,9 +185,22 @@ def fit(bjd, flux, flux_err=None, *, period: float,
         if 5 <= int(m.sum()) <= len(m) - 5:
             after_flip = m
 
+    # flip_step_fixed holds the step at a value measured elsewhere (the
+    # trapezoid's). When the flip lands inside the transit, a free step plus
+    # the baseline polynomial can absorb part of the transit itself: on
+    # TOI-6303 b (flip 8 min after first contact) the step went to -11,600
+    # ppm against the trapezoid's -1,069, and the fit came back 19 min short,
+    # 18% shallow and 3 min late.
+    fit_step = after_flip is not None and flip_step_fixed is None
+
     def model(t_, *pp):
         pp = list(pp)
-        step = pp.pop() if after_flip is not None else 0.0
+        if fit_step:
+            step = pp.pop()
+        elif after_flip is not None:
+            step = float(flip_step_fixed)
+        else:
+            step = 0.0
         mask = after_flip
         if mask is not None and len(t_) != len(mask):
             mask = np.asarray(t_) > float(flip_bjd)
@@ -193,7 +213,7 @@ def fit(bjd, flux, flux_err=None, *, period: float,
     # ground-based transit does not redetermine planet size.
     lo = [bjd.min(), rp0 * 0.5, 1.5, 60.0, 0.95, -2.0, -3.0]
     hi = [bjd.max(), rp0 * 1.6, 60.0, 90.0, 1.05, 2.0, 3.0]
-    if after_flip is not None:
+    if fit_step:
         lo, hi = lo + [-0.05], hi + [0.05]
 
     # Multi-start over mid-time: the chi-square surface has shallow local
@@ -230,7 +250,7 @@ def fit(bjd, flux, flux_err=None, *, period: float,
     best_chi2_select = np.inf
     for m in starts:
         p0 = [float(np.clip(m, lo[0], hi[0])), rp0, a0, 88.0, 1.0, 0.0, 0.0]
-        if after_flip is not None:
+        if fit_step:
             p0 = p0 + [0.0]
         p0 = [float(np.clip(v, a, b)) for v, a, b in zip(p0, lo, hi)]
         try:
@@ -292,16 +312,26 @@ def fit(bjd, flux, flux_err=None, *, period: float,
         duration_hours=transit_duration_hours(period, rp, a, inc),
         rms_ppm=float(np.std(resid) * 1e6),
         baseline_flux=float(popt[4]),
-        flip_step=float(popt[-1]) if after_flip is not None else 0.0,
+        flip_step=(float(popt[-1]) if fit_step
+                   else float(flip_step_fixed) if after_flip is not None
+                   else 0.0),
         flip_bjd=(float(flip_bjd) + origin if after_flip is not None else None),
         n_points=len(bjd_abs),
         u1=u1, u2=u2,
+        baseline_slope=float(popt[5]), baseline_curve=float(popt[6]),
+        flip_step_held=after_flip is not None and not fit_step,
     )
 
 
 def model_curve(t, fit_result: LimbDarkFit, period: float,
-                base: float = 1.0, slope: float = 0.0, curve: float = 0.0):
-    """Evaluate the fitted model on an arbitrary time grid, for plotting."""
+                base: float = 1.0, slope: float | None = None,
+                curve: float | None = None):
+    """Evaluate the fitted model on an arbitrary time grid, for plotting.
+    The baseline slope and curvature default to the fitted ones."""
+    if slope is None:
+        slope = getattr(fit_result, "baseline_slope", 0.0)
+    if curve is None:
+        curve = getattr(fit_result, "baseline_curve", 0.0)
     model = _model_factory(t, period, fit_result.u1, fit_result.u2)
     step = getattr(fit_result, "flip_step", 0.0)
     fb = getattr(fit_result, "flip_bjd", None)
