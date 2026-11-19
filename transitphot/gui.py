@@ -26,29 +26,6 @@ from tkinter import filedialog, messagebox, ttk
 SETTINGS = Path.home() / ".transitphot_gui.json"
 
 
-def _sexagesimal_to_deg(text, hours: bool) -> float | None:
-    """
-    'HH:MM:SS.ss' or '+DD:MM:SS.ss' -> decimal degrees, stdlib only.
-
-    ExoClock's JSON reports coordinates this way rather than as decimal
-    degrees (RA, confusingly, in hours — the traditional astronomical
-    convention — not degrees); NASA's archive gives decimal degrees
-    directly. Everything downstream of a lookup (the CLI's --ra/--dec,
-    every distance and WCS computation) expects decimal degrees, so this
-    conversion has to happen right here or a sexagesimal string quietly
-    fails to parse as a float much later, in a far less obvious place.
-    """
-    if not text:
-        return None
-    try:
-        text = str(text).strip()
-        sign = -1.0 if text.startswith("-") else 1.0
-        h, m, s = (float(x) for x in text.lstrip("+-").split(":"))
-        deg = sign * (h + m / 60.0 + s / 3600.0)
-        return deg * 15.0 if hours else deg
-    except (TypeError, ValueError):
-        return None
-
 # Fields persisted between sessions. Site details rarely change; target
 # details usually do, but keeping them saves retyping during a night of
 # reprocessing.
@@ -354,241 +331,49 @@ class App(tk.Tk):
         if not name:
             messagebox.showwarning("transitphot", "Enter a target name first.")
             return
-        self._say(f"\nLooking up {name} in the NASA Exoplanet Archive…\n")
+        self._say(f"\nLooking up {name} (NASA archive, ExoClock, "
+                  f"Exoplanet Watch, ExoFOP)…\n")
         threading.Thread(target=self._lookup_worker, args=(name,),
                          daemon=True).start()
 
-    def _exoclock_lookup(self, name):
-        """
-        Look up a planet in ExoClock's database as a fallback source.
-
-        The NASA archive's TAP API sits behind a Cloudflare challenge that
-        answers scripted clients with a 403 often enough to be a recurring
-        annoyance, not a rare fluke. ExoClock is a purpose-built alternative
-        for exactly this use — a community-maintained, actively-refined
-        ephemeris database for transit timing — reachable with one plain
-        request and no challenge in front of it. It also doesn't carry the
-        NASA archive's "pick the best of several published ephemerides"
-        problem: its t0/period ARE the current best, already.
-
-        ExoClock keys planets with no space before the letter ("WASP-10b"),
-        unlike this project's "WASP-10 b" convention, so match loosely.
-        Returns a dict in the same shape _lookup_worker already expects, or
-        None if the fetch fails or the name isn't found.
-        """
-        import urllib.request
-
-        try:
-            req = urllib.request.Request(
-                "https://www.exoclock.space/database/planets_json",
-                headers={"User-Agent": "transitphot"})
-            with urllib.request.urlopen(req, timeout=30) as r:
-                data = json.load(r)
-        except Exception:                                # noqa: BLE001
-            return None
-
-        key = re.sub(r"\s+", "", name).lower()
-        e = next((v for k, v in data.items()
-                 if re.sub(r"\s+", "", k).lower() == key), None)
-        if e is None:
-            return None
-
-        out = {"pl_name": name,
-              "ra": _sexagesimal_to_deg(e.get("ra_j2000"), hours=True),
-              "dec": _sexagesimal_to_deg(e.get("dec_j2000"), hours=False),
-              "sy_vmag": e.get("v_mag"), "sy_gaiamag": e.get("gaia_g_mag"),
-              "pl_tranmid": e.get("t0_bjd_tdb") or e.get("ephem_mid_time"),
-              "pl_orbper": e.get("period_days") or e.get("ephem_period"),
-              "pl_trandur": e.get("duration_hours")}
-        rps = e.get("rp_over_rs")
-        if rps:
-            out["pl_trandep"] = float(rps) ** 2 * 100       # fraction -> percent,
-                                                              # matching pl_trandep's
-                                                              # own convention
-        return out
-
     def _lookup_worker(self, name):
         """
-        Query the NASA Exoplanet Archive TAP service.
-
-        The service is often slow — 30 seconds is not unusual for a cold
-        query — so the timeout is generous and failures explain what to do
-        rather than just reporting the exception. Runs on a worker thread so
-        the window stays responsive.
+        Ask every ephemeris source (see ephemeris.py) and fill the form with
+        the one predicting the next transit most precisely, after showing
+        all of them side by side. Runs on a worker thread; the sources can
+        take a while, and each falls back to its cached copy when down.
         """
-        import time as _time
-        import urllib.error
-        import urllib.parse
-        import urllib.request
+        from . import ephemeris as _eph
 
-        wanted = ("pl_name, ra, dec, sy_vmag, sy_gaiamag, pl_orbper, "
-                  "pl_tranmid, pl_trandur, pl_trandep")
-        # Try the exact name first, then a case-insensitive match, then a
-        # prefix match — archive names carry spaces and capitalisation that
-        # are easy to get slightly wrong ("TrES-5b" vs "TrES-5 b").
-        safe = name.replace("'", "''")
-        queries = [
-            f"SELECT {wanted} FROM pscomppars WHERE pl_name = '{safe}'",
-            f"SELECT {wanted} FROM pscomppars "
-            f"WHERE UPPER(pl_name) = UPPER('{safe}')",
-            f"SELECT {wanted} FROM pscomppars "
-            f"WHERE UPPER(pl_name) LIKE UPPER('{safe}%')",
-        ]
-
-        def fetch(adql_text):
-            url = ("https://exoplanetarchive.ipac.caltech.edu/TAP/sync?query="
-                   + urllib.parse.quote(adql_text) + "&format=json")
-            req = urllib.request.Request(url, headers={"User-Agent": "transitphot"})
-            with urllib.request.urlopen(req, timeout=90) as r:
-                return json.load(r)
-
-        rows = None
-        last_err = None
-        for attempt, adql in enumerate(queries, 1):
-            # Each name form gets a couple of tries with a pause. The archive
-            # sometimes puts a Cloudflare challenge in front of its API, which
-            # answers any non-browser client with 403 — transient, but it will
-            # fail a whole run otherwise.
-            for delay in (0, 5, 15):
-                if delay:
-                    _time.sleep(delay)
-                try:
-                    rows = fetch(adql)
-                    last_err = None
-                    break
-                except Exception as exc:                # noqa: BLE001
-                    last_err = exc
-                    code = getattr(exc, "code", None)
-                    if code == 403:
-                        self.q.put("  archive returned 403 (it sometimes puts "
-                                   "a browser challenge in front of the API); "
-                                   "retrying\n")
-                    elif delay:
-                        self.q.put(f"  retry failed ({exc})\n")
-            if rows:
-                break
-            if last_err is not None:
-                self.q.put(f"  attempt {attempt} failed ({last_err})\n")
-
-        from_exoclock = False
-        if not rows:
-            self.q.put("  NASA archive lookup failed; trying ExoClock\n")
-            ec = self._exoclock_lookup(name)
-            if ec is not None:
-                self.q.put("  found in ExoClock\n")
-                r0 = ec
-                from_exoclock = True
-            elif last_err is not None:
-                self.q.put(
-                    "Lookup failed. The archive service is often slow or "
-                    "briefly unavailable — try again in a moment, or enter "
-                    "the values by hand from\n"
-                    "  https://exoplanetarchive.ipac.caltech.edu/\n"
-                    "  https://www.exoclock.space/database/planets\n")
-                return
-            else:
-                self.q.put(
-                    f"No archive entry matching '{name}'. Names carry a space "
-                    f"before the planet letter, e.g. 'TrES-5 b', "
-                    f"'Kepler-17 b', 'WASP-10 b'.\n")
-                return
-        else:
-            r0 = dict(rows[0])
-
-        # pscomppars holds one merged row per planet and its ephemeris is
-        # often the discovery paper's. Choosing between published
-        # ephemerides by publication date is wrong: a newer paper may report
-        # coarser values, and what matters is which one predicts TONIGHT
-        # most precisely. Uncertainty in a predicted mid-time grows as
-        # sqrt(dTc^2 + (n*dP)^2), so a small period error beats a recent
-        # date. Pick the ephemeris that minimizes that.
-        import math
-        import time as _time
-
-        eph = None
-        if from_exoclock:
-            # r0 already carries ExoClock's current-best t0/period directly —
-            # nothing to compare against, and no point asking the NASA
-            # archive for a target it just failed to answer about.
-            self.q.put("  using ExoClock's ephemeris directly "
-                       "(already its current best)\n")
-        else:
-            q_eph = (
-                "SELECT pl_tranmid, pl_tranmiderr1, pl_orbper, pl_orbpererr1, "
-                "pl_refname, pl_pubdate FROM ps "
-                f"WHERE pl_name = '{r0['pl_name']}' "
-                "AND pl_tranmid IS NOT NULL AND pl_orbper IS NOT NULL")
-            for delay in (0, 4):
-                if delay:
-                    _time.sleep(delay)  # the archive rate-limits rapid queries
-                try:
-                    eph = fetch(q_eph)
-                    break
-                except Exception as exc:                # noqa: BLE001
-                    last = exc
-            if eph is None:
-                self.q.put(f"  could not compare published ephemerides "
-                           f"({last}); trying ExoClock\n")
-                ec = self._exoclock_lookup(r0["pl_name"]) or self._exoclock_lookup(name)
-                if ec and ec.get("pl_tranmid") and ec.get("pl_orbper"):
-                    r0["pl_tranmid"] = ec["pl_tranmid"]
-                    r0["pl_orbper"] = ec["pl_orbper"]
-                    self.q.put("  using ExoClock's ephemeris instead "
-                               "of the archive default\n")
-                else:
-                    self.q.put("  not in ExoClock either; using the "
-                               "archive default\n")
-
-        if eph:
-            now_jd = _time.time() / 86400.0 + 2440587.5
-            best, best_unc = None, float("inf")
-            for e in eph:
-                try:
-                    E, P = float(e["pl_tranmid"]), float(e["pl_orbper"])
-                    if P <= 0:
-                        continue
-                    n = abs(round((now_jd - E) / P))
-                    dE = abs(float(e.get("pl_tranmiderr1") or 0.0))
-                    dP = abs(float(e.get("pl_orbpererr1") or 0.0))
-                    if dE == 0 and dP == 0:
-                        # No published uncertainties: infer precision from the
-                        # number of decimals actually reported.
-                        dP = 10 ** -max(len(repr(P).split(".")[-1]), 1)
-                        dE = 10 ** -max(len(repr(E).split(".")[-1]), 1)
-                    unc = math.sqrt(dE ** 2 + (n * dP) ** 2)
-                except (TypeError, ValueError):
-                    continue
-                if unc < best_unc:
-                    best, best_unc = e, unc
-            if best is not None:
-                r0["pl_tranmid"] = best["pl_tranmid"]
-                r0["pl_orbper"] = best["pl_orbper"]
-                ref = (best.get("pl_refname") or "").strip()
-                self.q.put(
-                    f"  ephemeris predicting tonight most precisely "
-                    f"(+/-{best_unc * 1440:.1f} min)"
-                    + (f": {ref[:70]}" if ref else "") + "\n")
-
-        # Whatever ephemeris ends up in the fields, say how precisely it
-        # predicts a transit now. An O-C is only as meaningful as the
-        # prediction it is measured against, and a stale or coarsely
-        # published ephemeris can be uncertain by more than the measurement.
+        log = lambda s: self.q.put(s + "\n")
         try:
-            E = float(r0["pl_tranmid"]); P = float(r0["pl_orbper"])
-            n = abs(round((_time.time() / 86400.0 + 2440587.5 - E) / P))
-            dE = abs(float(r0.get("pl_tranmiderr1") or 0.0))
-            dP = abs(float(r0.get("pl_orbpererr1") or 0.0))
-            if dE == 0 and dP == 0:
-                dP = 10 ** -max(len(repr(P).split(".")[-1]), 1)
-                dE = 10 ** -max(len(repr(E).split(".")[-1]), 1)
-            unc = math.sqrt(dE ** 2 + (n * dP) ** 2) * 1440
-            msg = (f"  this ephemeris predicts a transit now to "
-                   f"+/-{unc:.1f} min ({n} orbits since epoch)")
-            if unc > 3:
-                msg += " — large enough to dominate an O-C; check for a newer one"
-            self.q.put(msg + "\n")
-        except Exception:                               # noqa: BLE001
-            pass
+            r0, cands = _eph.gather(name, log=log)
+        except Exception as exc:                        # noqa: BLE001
+            self.q.put(f"Lookup failed ({exc}). Enter the values by hand "
+                       f"from https://exoplanetarchive.ipac.caltech.edu/ or "
+                       f"https://www.exoclock.space/database/planets\n")
+            return
+        if r0 is None and not cands:
+            self.q.put(
+                f"No source knows '{name}'. Names carry a space before the "
+                f"planet letter, e.g. 'TrES-5 b', 'Kepler-17 b', "
+                f"'WASP-10 b'.\n")
+            return
+        r0 = dict(r0 or {"pl_name": _eph.normalize_name(name)})
+        if cands:
+            cmp_ = _eph.compare(cands)
+            for line in cmp_.lines:
+                self.q.put(line + "\n")
+            r0["pl_tranmid"] = cmp_.best.t0
+            r0["pl_orbper"] = cmp_.best.period
+            self.q.put(f"  using {cmp_.best.source}: next transit "
+                       f"{cmp_.tc:.5f} BJD_TDB, +/-{cmp_.unc_min:.1f} min")
+            if cmp_.unc_min > 3:
+                self.q.put(" — large enough to dominate an O-C")
+            self.q.put("\n")
+        else:
+            self.q.put("  no source has an ephemeris for this planet; "
+                       "enter period and epoch by hand\n")
 
         def put(key, val, fmt="{:.6g}"):
             if val is not None:
