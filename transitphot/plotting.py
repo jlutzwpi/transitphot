@@ -71,7 +71,15 @@ def plot_lightcurve(bjd, flux, flux_err=None, fit_result=None,
     idx = np.digitize(x, np.linspace(x.min(), x.max(), nbins + 1)[1:-1])
     bx = np.array([x[idx == i].mean() for i in range(nbins) if (idx == i).any()])
     by = np.array([flux[idx == i].mean() for i in range(nbins) if (idx == i).any()])
-    be = np.array([flux[idx == i].std() / max(np.sqrt((idx == i).sum()), 1)
+    # Error bar = the curve's own point-to-point scatter / sqrt(points in
+    # the bin): the standard error of the bin's mean, given the night's
+    # frame-to-frame noise. The scatter WITHIN each bin used to be used
+    # instead, which is meaningless for the 2-3 points a 5-min bin holds at
+    # a 2-min cadence, and exactly zero for a bin with one point.
+    finite = np.isfinite(flux)
+    p2p = (float(np.nanstd(np.diff(flux[finite]))) / np.sqrt(2)
+           if finite.sum() > 2 else float("nan"))
+    be = np.array([p2p / np.sqrt((idx == i).sum())
                    for i in range(nbins) if (idx == i).any()])
     ax.errorbar(bx, by, yerr=be, fmt="o", ms=5, color="#1b2a4a",
                 capsize=2, label=f"{bin_minutes:.0f}-min bins")
@@ -192,7 +200,11 @@ def plot_lightcurve(bjd, flux, flux_err=None, fit_result=None,
         axes[1].set_ylabel("resid (ppm)")
         axes[1].grid(alpha=0.15)
 
-    (axes[1] if show_resid else ax).set_xlabel(f"hours (BJD_TDB - {t0:.0f})")
+    # x is (BJD_TDB - t0) * 24: hours elapsed since BJD_TDB t0.0. The old
+    # label, "hours (BJD_TDB - t0)", read as subtracting a day number from
+    # hours.
+    (axes[1] if show_resid else ax).set_xlabel(
+        f"hours since BJD_TDB {t0:.1f}")
     fig.tight_layout()
     from .annotate import _save_figure
     _save_figure(fig, Path(out))
