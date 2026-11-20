@@ -257,9 +257,22 @@ def cmd_run(args):
         scales = [args.aperture_scale]
     else:
         top = args.max_aperture_scale
+        # The final choice may not go below 1.3x the worst FWHM, so the
+        # ladder has to reach well past that, or the floor leaves one rung
+        # to "choose" from. On TOI-2578 b focus drifted until the worst star
+        # was 19 px against a 10.7 px session value: the floor (25 px) sat
+        # just under the top rung (27.8 px), which was taken by default
+        # while the scan was still improving there.
+        need = 2.0 * fwhm_max / fwhm if fwhm > 0 else top
+        if need > top:
+            print(f"Worst FWHM is {fwhm_max / fwhm:.1f}x the session value; "
+                  f"extending the aperture ladder to {need:.1f}x")
+            top = need
         scales = [round(0.7 * (top / 0.7) ** (i / 6), 2) for i in range(7)]
     RADII = [sc * fwhm for sc in scales]
-    R_IN, R_OUT = 3.5 * fwhm, 6.0 * fwhm
+    # Keep the sky annulus clear of the widest aperture.
+    R_IN = max(3.5 * fwhm, 1.25 * RADII[-1])
+    R_OUT = max(6.0 * fwhm, R_IN + 2.5 * fwhm)
     print(f"Session FWHM {fwhm:.2f} px (worst sampled {fwhm_max:.2f} px) | "
           f"trying apertures "
           + ", ".join(f"{r:.1f}" for r in RADII)

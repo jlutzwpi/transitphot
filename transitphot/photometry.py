@@ -18,7 +18,8 @@ from photutils.detection import DAOStarFinder
 
 
 def measure_fwhm(data: np.ndarray, xy: tuple[float, float],
-                 box: float = 15.0, min_snr: float = 5.0) -> float:
+                 box: float = 15.0, min_snr: float = 5.0,
+                 max_box: float = 60.0) -> float:
     """
     FWHM from the area of the star's half-maximum region.
 
@@ -46,6 +47,30 @@ def measure_fwhm(data: np.ndarray, xy: tuple[float, float],
     session_fwhm's own numbers because every frame that defocused was
     quietly dropped as "nothing bright enough here."
     """
+    f = _fwhm_in_box(data, xy, box, min_snr)
+    if np.isfinite(f) and f < 0.6 * box:
+        return f
+    # The star may be too big for the cutout rather than absent. Badly
+    # defocused stars fill a 30 px box: the sigma-clipped "background" is
+    # then the star's own wings, the peak sits barely above it, and the
+    # half-max region runs into the edge — so the result is NaN or capped
+    # just when the star is widest. On TOI-2578 b focus drifted through a
+    # 5 C temperature fall, stars grew from 6.6 px to well past 15 px, and
+    # every frame in the last hour measured NaN; the session's "worst"
+    # FWHM came out at 15.5 px and floored the aperture too tight. Retry in
+    # larger cutouts, keeping only the star's own connected half-max region
+    # so a neighbor that a wider box takes in can't be counted.
+    b = box
+    while b * 2 <= max_box:
+        b *= 2
+        g = _fwhm_in_box(data, xy, b, min_snr, peak_radius=box, connected=True)
+        if np.isfinite(g) and g < 0.6 * b:
+            return g
+    return f if np.isfinite(f) and f < 0.6 * box else float("nan")
+
+
+def _fwhm_in_box(data, xy, box, min_snr, peak_radius=None, connected=False):
+    """Half-max-area FWHM within one cutout; see measure_fwhm."""
     x, y = xy
     h, w = data.shape
     x0, x1 = int(max(x - box, 0)), int(min(x + box, w))
@@ -54,22 +79,35 @@ def measure_fwhm(data: np.ndarray, xy: tuple[float, float],
         return float("nan")
 
     cut = data[y0:y1, x0:x1].astype(float)
+    if peak_radius is not None:
+        # Look for the peak only near the expected position: a wide cutout
+        # can hold a brighter neighbor.
+        yy, xx = np.mgrid[0:cut.shape[0], 0:cut.shape[1]]
+        far = (xx - (x - x0)) ** 2 + (yy - (y - y0)) ** 2 > peak_radius ** 2
+    else:
+        far = None
     _, med, std = sigma_clipped_stats(cut, sigma=3.0)
     sub = cut - med
-    peak = float(np.nanmax(sub))
+    search = sub if far is None else np.where(far, -np.inf, sub)
+    peak = float(np.nanmax(search))
     if not np.isfinite(peak) or std <= 0 or peak < min_snr * std:
         return float("nan")                      # nothing bright enough here
 
     # Count only pixels near the center, so a neighboring star in the corner
     # of the cutout can't inflate the area.
-    py, px = np.unravel_index(int(np.nanargmax(sub)), sub.shape)
+    py, px = np.unravel_index(int(np.nanargmax(search)), sub.shape)
     yy, xx = np.mgrid[0:sub.shape[0], 0:sub.shape[1]]
     near = ((xx - px) ** 2 + (yy - py) ** 2) < (box * 0.8) ** 2
-    area = int(np.sum((sub > 0.5 * peak) & near))
+    above = (sub > 0.5 * peak) & near
+    if connected:
+        from scipy import ndimage
+        lab, _ = ndimage.label(above)
+        above = lab == lab[py, px]
+    area = int(np.sum(above))
     if area < 2:
         return float("nan")
     fwhm = 2.0 * math.sqrt(area / math.pi)
-    return float(fwhm) if 1.0 < fwhm < 20.0 else float("nan")
+    return float(fwhm) if 1.0 < fwhm < 1.4 * box else float("nan")
 
 
 def looks_saturated(data: np.ndarray, xy: tuple[float, float], box: int = 7,
