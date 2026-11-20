@@ -456,16 +456,27 @@ def gather(name: str, log=print) -> tuple[dict | None, list[Ephemeris]]:
 
 def compare(cands: list[Ephemeris], jd: float | None = None) -> Comparison:
     """
-    Choose the ephemeris that predicts the next transit most precisely by
-    its own stated uncertainty (a small period error beats a recent date),
-    then lay every source's prediction for that same transit side by side
-    and flag disagreement beyond what the stated uncertainties allow.
+    Choose the ephemeris to use, then lay every source's prediction for
+    that same transit side by side and flag disagreement beyond what the
+    stated uncertainties allow.
+
+    The NASA Exoplanet Archive comes first: among its published
+    ephemerides, the one that predicts the next transit most precisely by
+    its own stated uncertainty. The archive is the reference the community
+    cites, and its entries are peer-reviewed (Dennis Conti's advice). The
+    other sources are cross-checks; only when the archive has no
+    ephemeris for the planet does the most precise of them get used.
+    That trades a little precision for provenance, and the comparison
+    keeps it honest: on TOI-3757 b the archive's best entry was 16 min
+    off and Exoplanet Watch was right, which the DISAGREES flag shows.
     """
     if not cands:
         raise ValueError("no ephemerides to compare")
     jd = now_jd() if jd is None else jd
     preds = [(c, *c.predict(jd)) for c in cands]
-    best, _, _, _ = min(preds, key=lambda x: x[3])
+    nasa = [x for x in preds if x[0].source.startswith("NASA")]
+    best, _, _, _ = min(nasa or preds, key=lambda x: x[3])
+    sharpest = min(preds, key=lambda x: x[3])[0]
     # The next transit by the chosen ephemeris, then each source's
     # prediction of that same event.
     n = math.ceil((jd - best.t0) / best.period)
@@ -487,6 +498,8 @@ def compare(cands: list[Ephemeris], jd: float | None = None) -> Comparison:
     # discovery paper, 16 min). Listing all of them still shows the rest.
     top = [(c, tc, u) for c, tc, u in rows
            if u * 1440 <= INFORMATIVE_MIN][:3]
+    if not any(c is best for c, _, _ in top):
+        top.append(next(r for r in rows if r[0] is best))
     spread = ((max(tc for _, tc, _ in top) - min(tc for _, tc, _ in top))
               * 1440 if top else 0.0)
     disagree = any(disagrees(tc, u) for c, tc, u in top if c is not best)
@@ -498,6 +511,8 @@ def compare(cands: list[Ephemeris], jd: float | None = None) -> Comparison:
         s = f"    {c.source[:34]:34} {tc:.5f}  ±{u * 1440:5.1f} min"
         if c is best:
             s += "   <- using"
+            if c is not sharpest:
+                s += " (NASA first)"
         elif u * 1440 > INFORMATIVE_MIN:
             s += "   (too uncertain to compare)"
         else:

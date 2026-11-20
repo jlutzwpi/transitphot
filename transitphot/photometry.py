@@ -110,28 +110,113 @@ def _fwhm_in_box(data, xy, box, min_snr, peak_radius=None, connected=False):
     return float(fwhm) if 1.0 < fwhm < 1.4 * box else float("nan")
 
 
-def looks_saturated(data: np.ndarray, xy: tuple[float, float], box: int = 7,
-                    flat_frac: float = 0.03, min_flat_pixels: int = 4) -> bool:
-    """
-    Flag a star whose core looks clipped rather than genuinely peaked.
+SATURATION_MARGIN = 0.97   # flag a core within 3% of the ceiling
 
-    Deliberately doesn't compare against a known ADU ceiling: calibration
-    (bias/dark/flat) shifts a raw sensor's saturation level by an amount
-    that varies frame to frame and camera to camera, and these files are
-    float32 already-calibrated data with no reliable "full well" constant
-    left in the header to check against (confirmed absent across two
-    different cameras on this project). What survives calibration is the
-    SHAPE: an unsaturated star has one smoothly-peaked pixel; a clipped one
-    has several adjacent pixels sitting at (near) the same maximum - a flat
-    plateau where the PSF's point should be.
+
+def raw_ceiling(header) -> float | None:
+    """The ADC ceiling of an integer (uncalibrated) frame, from its header."""
+    bitpix = int(header.get("BITPIX") or 0)
+    if bitpix <= 0:
+        return None                       # float data: already processed
+    if bitpix == 8:
+        return 255.0                      # FITS bytes are unsigned
+    bzero = float(header.get("BZERO") or 0)
+    bscale = float(header.get("BSCALE") or 1)
+    return float((2 ** (bitpix - 1) - 1) * bscale + bzero) if bzero else \
+        float(2 ** (bitpix - 1) - 1)
+
+
+def saturation_ceiling(lights_dir, header):
+    """
+    The value a saturated pixel takes in these frames, and where it came from.
+
+    Returns (ceiling, description); ceiling is a scalar, a per-pixel array
+    (same shape as the frame), or None when nothing reliable is known.
+
+    In order of preference:
+      1. The night's own masters (``<lights>/masters``, written by
+         ``transitphot calibrate``). A raw pixel at the camera's ceiling
+         comes out of calibration as (ceiling - bias - dark) / flat for
+         that pixel, so the masters give the calibrated ceiling exactly,
+         pixel by pixel. The raw ceiling is read from the raw lights'
+         BITPIX/BZERO beside the calibrated folder (65535 for a 16-bit
+         camera, which is what nearly every astronomy camera writes).
+      2. A SATURATE (or DATAMAX) header value — ``calibrate`` now writes
+         one into every calibrated light.
+      3. Raw integer frames: the ceiling of their bit depth.
+    """
+    from pathlib import Path
+    from astropy.io import fits as _fits
+
+    lights_dir = Path(lights_dir)
+    mdir = lights_dir / "masters"
+    flat_p = mdir / "master_flat.fits"
+    bias_p, dark_p = mdir / "master_bias.fits", mdir / "master_dark.fits"
+    if mdir.is_dir() and any(p.exists() for p in (flat_p, bias_p, dark_p)):
+        raw_max, how = None, "assumed 16-bit"
+        for p in fits_files(lights_dir.parent)[:5]:
+            try:
+                raw_max = raw_ceiling(_fits.getheader(p))
+            except Exception:                            # noqa: BLE001
+                raw_max = None
+            if raw_max:
+                how = f"raw frames' BITPIX {_fits.getheader(p)['BITPIX']}"
+                break
+        raw_max = raw_max or 65535.0
+        try:
+            ceiling = np.full(
+                (int(header["NAXIS2"]), int(header["NAXIS1"])), raw_max)
+            if bias_p.exists():
+                ceiling = ceiling - _fits.getdata(bias_p).astype(float)
+            if dark_p.exists():
+                # calibrate subtracts the dark unscaled (exposure-matched),
+                # and the master dark is bias-subtracted when a bias exists
+                ceiling = ceiling - _fits.getdata(dark_p).astype(float)
+            if flat_p.exists():
+                flat = _fits.getdata(flat_p).astype(float)
+                flat = np.where(np.isfinite(flat) & (flat > 0.05), flat, 1.0)
+                ceiling = ceiling / flat
+            return ceiling, (f"camera ceiling {raw_max:,.0f} ADU ({how}) "
+                             f"through this night's masters")
+        except Exception:                                # noqa: BLE001
+            pass                    # masters unreadable or a shape mismatch
+    for key in ("SATURATE", "DATAMAX"):
+        v = header.get(key)
+        try:
+            if v is not None and float(v) > 0:
+                return float(v), f"{key} header ({float(v):,.0f} ADU)"
+        except (TypeError, ValueError):
+            pass
+    c = raw_ceiling(header)
+    if c:
+        return c, f"uncalibrated {header.get('BITPIX')}-bit frames ({c:,.0f} ADU)"
+    return None, None
+
+
+def looks_saturated(data: np.ndarray, xy: tuple[float, float], box: int = 7,
+                    flat_frac: float = 0.03, min_flat_pixels: int = 4,
+                    ceiling=None, fwhm: float | None = None) -> bool:
+    """
+    Flag a star whose core is at, or within 3% of, the camera's ceiling.
+
+    With a known ceiling (see saturation_ceiling) this is a direct test:
+    any core pixel at or above SATURATION_MARGIN x the ceiling. Dennis
+    Conti asked the right question: without the camera's numbers, how is
+    saturation known? Before this, it wasn't, only inferred.
+
+    Without one (frames calibrated elsewhere, with no masters and no
+    SATURATE keyword) it falls back to SHAPE: an unsaturated star has a
+    smoothly peaked core; a clipped one has a plateau of pixels at nearly
+    the same value. The plateau test has to allow for star width: a
+    Gaussian's top is broad, and at FWHM ~10 px an unsaturated star already
+    has 4-5 pixels within 3% of its peak, which a fixed count of 4 read as
+    clipped. So the count needed scales with the expected near-peak area.
 
     Caught on HAT-P-53 b: the automatic comparison-star selection (which
-    now deliberately favors brighter stars for lower noise) nominated 5
-    candidates up to 2.8 mag brighter than the target, all of which turned
-    out to be saturated — caught only after a full-session measurement
-    pass, by their individual scatter being 100,000+ ppm. This check is
-    meant to catch the same thing on the reference frame alone, before
-    that wasted pass.
+    favors brighter stars for lower noise) nominated 5 candidates up to
+    2.8 mag brighter than the target, all saturated — caught only after a
+    full-session measurement pass, by their 100,000+ ppm scatter. This
+    check catches that on the reference frame alone.
     """
     x, y = xy
     h, w = data.shape
@@ -141,11 +226,22 @@ def looks_saturated(data: np.ndarray, xy: tuple[float, float], box: int = 7,
     if x0 < 0 or y0 < 0 or x1 > w or y1 > h or x1 - x0 < 3 or y1 - y0 < 3:
         return False
     cut = data[y0:y1, x0:x1].astype(float)
+    if ceiling is not None:
+        c = (np.asarray(ceiling)[y0:y1, x0:x1] if np.ndim(ceiling) == 2
+             else float(ceiling))
+        return bool(np.any(cut >= SATURATION_MARGIN * c))
     peak = float(np.nanmax(cut))
     if not np.isfinite(peak) or peak <= 0:
         return False
+    need = min_flat_pixels
+    if fwhm and fwhm > 0:
+        # pixels of a Gaussian within flat_frac of its peak: radius
+        # sigma * sqrt(-2 ln(1 - flat_frac))
+        r = (fwhm / 2.3548) * math.sqrt(-2.0 * math.log(1.0 - flat_frac))
+        need = max(min_flat_pixels, int(math.ceil(3.0 * math.pi * r * r)))
+        need = min(need, int(0.8 * cut.size))
     near_peak = int(np.sum(cut >= peak * (1.0 - flat_frac)))
-    return near_peak >= min_flat_pixels
+    return near_peak >= need
 
 
 def session_fwhm(paths, positions_fn, sample: int = 100_000,

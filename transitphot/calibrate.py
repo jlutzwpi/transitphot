@@ -387,8 +387,28 @@ def calibrate_night(lights_dir: Path, bias_dir: Path | None = None,
 
     written = []
     lights = fits_files(lights_dir)
+    # Where a saturated pixel lands after calibration, for frames that later
+    # travel without their masters: (raw ceiling - bias - dark) / flat. One
+    # number per frame has to cover every pixel, so take the flat's high
+    # end — a saturated pixel where the flat is brightest comes out lowest.
+    # `run` prefers the exact per-pixel value from the masters when it can.
+    from astropy.io import fits as _fits
+    from .photometry import raw_ceiling
+    pedestal = 0.0
+    if mb is not None:
+        pedestal += float(np.nanmedian(mb.data))
+    if md is not None:
+        pedestal += float(np.nanmedian(md.data))
+    f_hi = float(np.nanpercentile(mf.data, 99.9)) if mf is not None else 1.0
     for i, p in enumerate(lights):
         cal = _for_write(calibrate_light(p, mb, md, mf, scale_dark=scale_dark))
+        try:
+            raw_max = raw_ceiling(_fits.getheader(p)) or 65535.0
+            cal.meta["SATURATE"] = (
+                round((raw_max - pedestal) / f_hi, 1),
+                "[adu] calibrated value of a saturated pixel")
+        except Exception:                                # noqa: BLE001
+            pass
         dest = out_dir / f"cal_{p.name}"
         # Checked with the real, already-computed frame size, against how
         # many frames are left — so a doomed run stops on the first frame

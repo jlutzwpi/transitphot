@@ -287,6 +287,14 @@ def cmd_run(args):
         _hdr = hdr0
         _data = fits.getdata(ref_path)
         _h, _w = _data.shape
+        _ceiling, _ceil_how = ph.saturation_ceiling(args.lights, _hdr)
+        if _ceiling is not None:
+            print(f"Saturation level from {_ceil_how}")
+            _sat_how = "at or near saturation"
+        else:
+            print("Saturation level unknown (no masters, SATURATE keyword "
+                  "or raw frames); judging saturation by star shape")
+            _sat_how = "flat-topped core"
         # Checking the reference frame alone is not enough: after a meridian
         # flip the mount re-centers, and the field can shift by many
         # arcminutes. On Qatar-4 b the post-flip pointing moved ~9' north and
@@ -327,7 +335,8 @@ def cmd_run(args):
             if not _on_sensor_everywhere(c):
                 off.append(c); continue
             cx, cy = ph.sky_to_pixel(_hdr, c.ra_deg, c.dec_deg)
-            if ph.looks_saturated(_data, (cx, cy)):
+            if ph.looks_saturated(_data, (cx, cy), ceiling=_ceiling,
+                                  fwhm=fwhm):
                 sat.append(c); continue
             keep_comps.append(c)
         if off:
@@ -340,7 +349,7 @@ def cmd_run(args):
             # bright enough to clip, discovered only by their individual
             # scatter once the whole session had already been measured.
             print(f"Dropping {len(sat)} comparison star(s) that look "
-                  f"saturated in the reference frame (flat-topped core): "
+                  f"saturated in the reference frame ({_sat_how}): "
                   + ', '.join(f"G={c.mag:.2f} at {c.sep_arcmin:.1f}'" for c in sat))
         comps = keep_comps
         if len(comps) < 2:
@@ -348,10 +357,11 @@ def cmd_run(args):
                 "Fewer than two comparison stars fall inside the frame. "
                 "Reduce --radius, or check that the field is as expected.")
         _txy = _target_xy(_hdr)
-        if _txy is not None and ph.looks_saturated(_data, _txy):
-            print("WARNING: the target itself looks saturated (flat-topped "
-                  "core) in the reference frame — results will likely read "
-                  "the depth shallow. Shorter exposures would help.")
+        if _txy is not None and ph.looks_saturated(_data, _txy,
+                                                   ceiling=_ceiling, fwhm=fwhm):
+            print(f"WARNING: the target itself looks saturated ({_sat_how}) "
+                  f"in the reference frame — results will likely read "
+                  f"the depth shallow. Shorter exposures would help.")
     except SystemExit:
         raise
     except Exception as exc:                             # noqa: BLE001
