@@ -110,7 +110,11 @@ def _fwhm_in_box(data, xy, box, min_snr, peak_radius=None, connected=False):
     return float(fwhm) if 1.0 < fwhm < 1.4 * box else float("nan")
 
 
-SATURATION_MARGIN = 0.97   # flag a core within 3% of the ceiling
+# Flag a core above 90% of the computed ceiling. The computed value is not
+# exact: on WASP-12 b a clearly clipped star (a 14-pixel plateau) sat at
+# 96% of it, so the real clip point is a few percent lower, and the last
+# 10% of a CMOS sensor's range is where response starts to bend anyway.
+SATURATION_MARGIN = 0.90
 
 
 def raw_ceiling(header) -> float | None:
