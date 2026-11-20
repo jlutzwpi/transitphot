@@ -763,8 +763,15 @@ def cmd_run(args):
         w.writerow(["jd_utc", "rel_flux", "rel_flux_err"])
         for t, fl, e in zip(times, norm, err):
             w.writerow([f"{t:.6f}", f"{fl:.6f}", f"{e:.6f}"])
-    rms = np.nanstd(norm) * 1e6
-    print(f"Wrote {out} — {len(times)} points, scatter {rms:.0f} ppm")
+    # Point-to-point scatter: frame-to-frame noise, which the transit dip and
+    # slow trends barely touch. The plain standard deviation of the whole
+    # curve used to be printed here, and it counts the transit itself as
+    # noise — 9,120 ppm on a TOI-3629 b night whose fitted residual RMS was
+    # 4,377 ppm.
+    p2p = (np.nanstd(np.diff(norm)) / np.sqrt(2) * 1e6
+           if len(norm) > 2 else float("nan"))
+    print(f"Wrote {out} — {len(times)} points, point-to-point scatter "
+          f"{p2p:.0f} ppm per frame")
     print("Compare that scatter against the precision TransitPlanner predicted; "
           "a large gap means the model needs calibrating for your setup.")
 
@@ -997,17 +1004,36 @@ def cmd_run(args):
                 # An explicit --aavso-filter wins; otherwise map the imaging
                 # filter to a ShortName and carry its description into NOTES,
                 # which the format requires whenever the code is "O".
-                if args.aavso_filter:
-                    filt, filt_desc = args.aavso_filter.upper(), ""
+                from .export import AAVSO_FILTERS
+                explicit = (args.aavso_filter or "").strip().upper()
+                if explicit and explicit not in AAVSO_FILTERS:
+                    # "N/A", "L", "Lum"... are not AAVSO ShortNames and the
+                    # database rejects or misfiles them. Fall back to mapping
+                    # the imaging filter, which gives a valid code (and the
+                    # description the format requires for "O").
+                    print(f"  WARNING: --aavso-filter {args.aavso_filter!r} is "
+                          f"not an AAVSO filter code "
+                          f"({', '.join(sorted(AAVSO_FILTERS))}); deriving it "
+                          f"from the imaging filter instead")
+                    explicit = ""
+                if explicit:
+                    filt, filt_desc = explicit, ""
                 else:
                     filt, filt_desc = aavso_filter(args.filter_band)
                     if filt_desc:
                         print(f"  filter {args.filter_band} -> AAVSO '{filt}' "
                               f"({filt_desc})")
-                priors = (f"period {args.period_days} d; "
-                          f"duration {args.duration_hours} h fixed; "
-                          f"depth prior {args.depth_ppm} ppm; "
-                          f"quadratic limb darkening u1=0.35 u2=0.25")
+                # Say what the reported (trapezoid) fit actually assumed.
+                # Depth is only a starting guess; the mid-time carries a soft
+                # Gaussian prior on the ephemeris prediction.
+                dur_txt = (f"duration fixed at {args.duration_hours} h"
+                           if args.fix_duration and args.duration_hours
+                           else "duration free")
+                mid_txt = (f"mid-time Gaussian prior 15 min about "
+                           f"{args.predicted_mid:.5f}"
+                           if args.predicted_mid else "no mid-time prior")
+                priors = (f"period {args.period_days} d; {dur_txt}; {mid_txt}; "
+                          f"trapezoid model (no limb darkening)")
                 results = (f"Tc={res.mid_bjd:.5f} BJD_TDB "
                            f"+/-{res.mid_err_minutes:.1f} min; "
                            f"depth={res.depth_ppm:.0f}+/-{res.depth_err*1e6:.0f} "
