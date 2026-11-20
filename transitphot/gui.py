@@ -571,6 +571,20 @@ class App(tk.Tk):
             messagebox.showwarning(
                 "transitphot", "Missing: " + ", ".join(missing))
             return
+        # The site is entered once and saved with the settings. Without it
+        # the run cannot correct for airmass or colour extinction, which on
+        # a TOI-3629 b run left a sloped baseline the two fits read
+        # differently, 2.5 min apart.
+        if not (self.vars["lat"].get().strip()
+                and self.vars["lon"].get().strip()):
+            messagebox.showwarning(
+                "transitphot",
+                "Enter your site's latitude and longitude (decimal degrees, "
+                "west negative) under Site and Instrument. They are saved "
+                "for later runs.\n\n"
+                "The run needs them to correct for airmass and colour "
+                "extinction.")
+            return
         v = {k: var.get().strip() for k, var in self.vars.items()}
         name = v["target_name"] or "target"
         cmd = self._base_cmd("run") + [

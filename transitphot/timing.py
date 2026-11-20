@@ -20,7 +20,7 @@ from astropy.time import Time
 
 
 def jd_utc_to_bjd_tdb(jd_utc: np.ndarray, ra_deg: float, dec_deg: float,
-                      lat_deg: float, lon_deg: float,
+                      lat_deg: float | None, lon_deg: float | None,
                       elevation_m: float = 0.0) -> np.ndarray:
     """
     Convert an array of JD(UTC) mid-exposure times to BJD_TDB.
@@ -28,9 +28,18 @@ def jd_utc_to_bjd_tdb(jd_utc: np.ndarray, ra_deg: float, dec_deg: float,
     Applies both corrections astropy provides:
       * the Rømer delay (light travel time to the solar-system barycenter),
       * the UTC -> TDB timescale conversion (relativistic clock differences).
+
+    With no site (lat/lon None) the observer is placed at Earth's center.
+    The site's own contribution is at most Earth's radius over c, 21 ms —
+    far below any transit timing precision — so this is still BJD_TDB in
+    every sense that matters, where leaving the times in JD(UTC) is wrong
+    by up to 8 minutes.
     """
-    site = EarthLocation(lat=lat_deg * u.deg, lon=lon_deg * u.deg,
-                         height=elevation_m * u.m)
+    if lat_deg is None or lon_deg is None:
+        site = EarthLocation.from_geocentric(0.0, 0.0, 0.0, unit=u.m)
+    else:
+        site = EarthLocation(lat=lat_deg * u.deg, lon=lon_deg * u.deg,
+                             height=elevation_m * u.m)
     target = SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg)
     t = Time(np.asarray(jd_utc, dtype=float), format="jd", scale="utc",
              location=site)

@@ -83,13 +83,51 @@ def _with_timeout(fn, seconds: float):
             box["value"] = fn()
         except BaseException as exc:                     # noqa: BLE001
             box["error"] = exc
+        finally:
+            # Thread ids are reused once a thread ends; don't let a later,
+            # unrelated thread inherit this one's mute.
+            _MUTED.discard(threading.get_ident())
 
     t = threading.Thread(target=work, daemon=True)
     t.start()
     t.join(seconds)
     if t.is_alive():
+        # The abandoned query keeps running and astroquery prints whatever
+        # the server finally says ("500 Error 500: null" on a Gaia outage)
+        # straight into the middle of the run's log, minutes later, where it
+        # reads as a failure of whatever step is running then — the fit, on
+        # a TOI-3629 b run. Silence that thread only.
+        _mute_thread(t)
         return None, TimeoutError(f"no answer after {seconds:.0f}s")
     return box.get("value"), box.get("error")
+
+
+_MUTED: set = set()
+
+
+class _ThreadFilter:
+    """A stream that drops writes from muted threads and passes the rest."""
+
+    def __init__(self, stream):
+        self._stream = stream
+
+    def write(self, text):
+        import threading
+        if threading.get_ident() in _MUTED:
+            return len(text)
+        return self._stream.write(text)
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
+def _mute_thread(t) -> None:
+    import sys
+    _MUTED.add(t.ident)
+    for name in ("stdout", "stderr"):
+        s = getattr(sys, name)
+        if s is not None and not isinstance(s, _ThreadFilter):
+            setattr(sys, name, _ThreadFilter(s))
 
 
 

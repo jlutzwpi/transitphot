@@ -478,15 +478,17 @@ def cmd_run(args):
     from .timing import jd_utc_to_bjd_tdb as _to_bjd
     try:
         bjd_all = _to_bjd(np.asarray(times), args.ra, args.dec,
-                          args.lat, args.lon, args.elevation) \
-            if args.lat is not None else np.asarray(times)
+                          args.lat, args.lon, args.elevation)
     except Exception:                                # noqa: BLE001
         bjd_all = np.asarray(times)
 
-    if args.lat is not None and args.lon is not None:
+    if flip_jd_hdr is not None or no_flip_hdr or (
+            args.lat is not None and args.lon is not None):
         try:
             from .timing import meridian_crossing as _mc
-            _m = _mc(times, args.ra, args.lat, args.lon)
+            _m = (flip_jd_hdr if flip_jd_hdr is not None
+                  else None if no_flip_hdr
+                  else _mc(times, args.ra, args.lat, args.lon))
             if _m is not None:
                 flip_for_scan = float(_to_bjd(
                     np.array([_m]), args.ra, args.dec,
@@ -824,16 +826,20 @@ def cmd_run(args):
 
 
     # --- BJD_TDB ---
-    if args.lat is not None and args.lon is not None:
-        from .timing import jd_utc_to_bjd_tdb
-        bjd = jd_utc_to_bjd_tdb(times, args.ra, args.dec,
-                                args.lat, args.lon, args.elevation)
-        shift = (bjd - times).mean() * 24 * 60
-        print(f"Converted to BJD_TDB (barycentric shift {shift:+.2f} min)")
-    else:
-        bjd = times
-        print("NOTE: times are JD(UTC). Pass --lat/--lon for BJD_TDB — "
-              "required for ExoClock/AAVSO submission.")
+    # Always converted. Without a site this used to leave the times in
+    # JD(UTC) while every later line, the plot and the AIJ hand-off still
+    # called them BJD_TDB, and the O-C mixed the two: on a TOI-3629 b run
+    # that put the result 7.3 min early. The site matters by 21 ms at most.
+    from .timing import jd_utc_to_bjd_tdb
+    has_site = args.lat is not None and args.lon is not None
+    bjd = jd_utc_to_bjd_tdb(times, args.ra, args.dec,
+                            args.lat, args.lon, args.elevation)
+    shift = (bjd - times).mean() * 24 * 60
+    print(f"Converted to BJD_TDB (barycentric shift {shift:+.2f} min)")
+    if not has_site:
+        print("NOTE: no --lat/--lon, so BJD_TDB is computed for Earth's "
+              "center (within 0.02 s of your site's). Airmass detrending "
+              "needs the site and is skipped; pass --lat/--lon for it.")
 
     # --- fit ---
     res = ld_result = air = flip_bjd = None
@@ -862,16 +868,19 @@ def cmd_run(args):
         elif args.detrend_airmass:
             print("  airmass detrending needs --lat/--lon; skipped")
 
+        # The PIERSIDE flip needs no site; only the computed meridian
+        # crossing (the fallback when headers don't record the pier side)
+        # does. Requiring a site for both silently dropped a flip that the
+        # headers had pinned exactly.
         flip_bjd = None
-        if args.lat is not None and args.lon is not None:
-            from .timing import meridian_crossing, jd_utc_to_bjd_tdb
-            mj = (flip_jd_hdr if flip_jd_hdr is not None
-                  else None if no_flip_hdr
-                  else meridian_crossing(times, args.ra, args.lat, args.lon))
-            if mj is not None:
-                flip_bjd = float(jd_utc_to_bjd_tdb(
-                    np.array([mj]), args.ra, args.dec,
-                    args.lat, args.lon, args.elevation)[0])
+        mj = flip_jd_hdr
+        if mj is None and not no_flip_hdr and has_site:
+            from .timing import meridian_crossing
+            mj = meridian_crossing(times, args.ra, args.lat, args.lon)
+        if mj is not None:
+            flip_bjd = float(jd_utc_to_bjd_tdb(
+                np.array([mj]), args.ra, args.dec,
+                args.lat, args.lon, args.elevation)[0])
 
         res = fit_transit(
             bjd, norm, err,
@@ -986,10 +995,6 @@ def cmd_run(args):
         if args.predicted_mid:
             pred = args.predicted_mid
             if args.pred_system == "jd_utc":
-                if args.lat is None or args.lon is None:
-                    raise SystemExit(
-                        "--predicted-mid-system jd_utc needs --lat/--lon to "
-                        "convert the prediction to BJD_TDB.")
                 from .timing import jd_utc_to_bjd_tdb
                 pred = float(jd_utc_to_bjd_tdb(
                     np.array([pred]), args.ra, args.dec,
@@ -1004,7 +1009,7 @@ def cmd_run(args):
             from .export import write_lightcurve, write_summary, write_aavso
             meta = {"target_ra_deg": args.ra, "target_dec_deg": args.dec,
                     "n_comparison_stars": int(keep.sum()),
-                    "time_system": "BJD_TDB" if args.lat is not None else "JD_UTC"}
+                    "time_system": "BJD_TDB"}
             base = Path(args.out).with_suffix("")
             write_lightcurve(base.with_suffix(".txt"), bjd, norm, err, meta)
             write_summary(base.with_name(base.name + "_summary.json"), res, meta,
@@ -1078,7 +1083,7 @@ def cmd_run(args):
                 from .plotting import plot_lightcurve
                 from .timing import meridian_crossing
                 mer = None
-                if args.lat is not None and args.lon is not None:
+                if flip_jd_hdr is not None or has_site:
                     mer_jd = (flip_jd_hdr if flip_jd_hdr is not None
                               else None if no_flip_hdr
                               else meridian_crossing(times, args.ra,
@@ -1109,8 +1114,7 @@ def cmd_run(args):
     # --- AstroImageJ hand-off: the same stars and apertures, ready to load ---
     try:
         from . import aij
-        if flip_bjd is None and flip_jd_hdr is not None \
-                and args.lat is not None and args.lon is not None:
+        if flip_bjd is None and flip_jd_hdr is not None:
             from .timing import jd_utc_to_bjd_tdb
             flip_bjd = float(jd_utc_to_bjd_tdb(
                 np.array([flip_jd_hdr]), args.ra, args.dec,
