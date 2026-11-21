@@ -37,7 +37,11 @@ def plot_lightcurve(bjd, flux, flux_err=None, fit_result=None,
     bjd = np.asarray(bjd, float)
     flux = np.asarray(flux, float)
     t0 = np.floor(bjd.min())
-    x = (bjd - t0) * 24.0                       # hours since start of day
+    # x is BJD_TDB - t0 in DAYS (the AstroImageJ convention), so the
+    # mid-transit printed in the log (e.g. .81125) reads straight off the axis.
+    # An hours-since-t0 axis was used before; because a Julian day starts at
+    # noon UT its numbers (18, 19, ...) matched nothing an observer recognises.
+    x = bjd - t0
 
     has_fit = fit_result is not None
     show_resid = has_fit or ld_fit is not None
@@ -67,7 +71,7 @@ def plot_lightcurve(bjd, flux, flux_err=None, fit_result=None,
     ax.plot(x, flux, ".", ms=3, color="#9aa4b8", alpha=0.6, label="frames")
 
     # time-binned points — what the eye should actually judge
-    nbins = max(int((x.max() - x.min()) * 60 / bin_minutes), 1)
+    nbins = max(int((x.max() - x.min()) * 1440 / bin_minutes), 1)
     idx = np.digitize(x, np.linspace(x.min(), x.max(), nbins + 1)[1:-1])
     bx = np.array([x[idx == i].mean() for i in range(nbins) if (idx == i).any()])
     by = np.array([flux[idx == i].mean() for i in range(nbins) if (idx == i).any()])
@@ -88,8 +92,9 @@ def plot_lightcurve(bjd, flux, flux_err=None, fit_result=None,
     def vline(ax, when, color, label, style="--"):
         if when is None:
             return
-        xv = (when - t0) * 24.0
-        if not (x.min() - 0.2 <= xv <= x.max() + 0.2):
+        xv = when - t0
+        pad = 0.2 / 24.0                         # 12 minutes either side
+        if not (x.min() - pad <= xv <= x.max() + pad):
             return
         ax.axvline(xv, ls=style, lw=1.1, color=color, alpha=0.75)
         ax.annotate(label, xy=(xv, 1.0), xycoords=("data", "axes fraction"),
@@ -119,9 +124,9 @@ def plot_lightcurve(bjd, flux, flux_err=None, fit_result=None,
                              fit_result.baseline_curve)
 
         model = _model(fine)
-        ax.plot((fine - t0) * 24.0, model, "-", lw=1.8, color="#c1121f",
+        ax.plot(fine - t0, model, "-", lw=1.8, color="#c1121f",
                 label="trapezoid fit")
-        ax.axvline((fit_result.mid_bjd - t0) * 24.0, ls="--", lw=1,
+        ax.axvline(fit_result.mid_bjd - t0, ls="--", lw=1,
                    color="#c1121f", alpha=0.5)
 
     # Overlay the limb-darkened model when one was fitted. Drawing both is
@@ -136,9 +141,9 @@ def plot_lightcurve(bjd, flux, flux_err=None, fit_result=None,
         if _ld_fb and _ld_step:
             ld_model = np.where(np.asarray(fine) > _ld_fb,
                                 ld_model / (1.0 + _ld_step), ld_model)
-        ax.plot((fine - t0) * 24.0, ld_model, "-", lw=1.8, color="#2a6f97",
+        ax.plot(fine - t0, ld_model, "-", lw=1.8, color="#2a6f97",
                 label="limb-darkened fit")
-        ax.axvline((ld_fit.mid_bjd - t0) * 24.0, ls="--", lw=1,
+        ax.axvline(ld_fit.mid_bjd - t0, ls="--", lw=1,
                    color="#2a6f97", alpha=0.5)
 
     ax.set_ylabel("normalized flux")
@@ -200,11 +205,7 @@ def plot_lightcurve(bjd, flux, flux_err=None, fit_result=None,
         axes[1].set_ylabel("resid (ppm)")
         axes[1].grid(alpha=0.15)
 
-    # x is (BJD_TDB - t0) * 24: hours elapsed since BJD_TDB t0.0. The old
-    # label, "hours (BJD_TDB - t0)", read as subtracting a day number from
-    # hours.
-    (axes[1] if show_resid else ax).set_xlabel(
-        f"hours since BJD_TDB {t0:.1f}")
+    (axes[1] if show_resid else ax).set_xlabel(f"BJD_TDB − {t0:.0f}")
     fig.tight_layout()
     from .annotate import _save_figure
     _save_figure(fig, Path(out))
