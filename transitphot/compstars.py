@@ -819,6 +819,17 @@ def choose_ensemble(target_flux, comp_flux, out_of_transit,
     does. With fifty candidates this costs a few hundred evaluations where
     trying every subset would need millions.
 
+    Each set is scored with a PLAIN SUM of raw fluxes and the robust (MAD)
+    scatter, even though the final curve uses median-normalized 1/scatter^2
+    weights. That mismatch is deliberate. Scoring with the final weights
+    lets every subset tune its own weights to the ~60 out-of-transit points,
+    and the search then fits their noise: on TOI-3629 b it looked 15% better
+    to the search and came out 7-10% worse on every independent measure.
+    In November 2026, eight alternatives (plain sum / normalized / inverse-
+    variance reference x MAD / point-to-point / detrended RMS) were tested
+    on 13 nights, choosing on alternate blocks of out-of-transit frames and
+    judging on the rest; none was reliably better than this one.
+
     Returns the chosen indices into comp_flux.
     """
     target_flux = np.asarray(target_flux, dtype=float)
